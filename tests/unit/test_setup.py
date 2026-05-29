@@ -556,16 +556,6 @@ class TestIDESetupParametrized:
         "windsurf": {
             "hooks": {"pre_user_prompt": [{"command": "other-tool"}]}
         },
-        "codex": {
-            "hooks": {
-                "PreToolUse": [
-                    {
-                        "matcher": ".*",
-                        "hooks": [{"type": "command", "command": "other-tool"}],
-                    }
-                ]
-            }
-        },
         "gemini": {
             "hooks": [
                 {"event": "BeforeTool", "matcher": ".*", "command": "other-tool"}
@@ -624,8 +614,8 @@ class TestIDESetupParametrized:
 
     @pytest.mark.parametrize(
         "ide_name",
-        ["claude", "cursor", "windsurf", "codex", "gemini", "augment"],
-        ids=["claude", "cursor", "windsurf", "codex", "gemini", "augment"],
+        ["claude", "cursor", "windsurf", "gemini", "augment"],
+        ids=["claude", "cursor", "windsurf", "gemini", "augment"],
     )
     def test_check_hooks_configured_json(self, tmp_path, ide_name):
         """Verify check_hooks_configured returns True when ai-guardian is present."""
@@ -636,8 +626,8 @@ class TestIDESetupParametrized:
 
     @pytest.mark.parametrize(
         "ide_name",
-        ["claude", "cursor", "windsurf", "codex", "gemini", "augment"],
-        ids=["claude", "cursor", "windsurf", "codex", "gemini", "augment"],
+        ["claude", "cursor", "windsurf", "gemini", "augment"],
+        ids=["claude", "cursor", "windsurf", "gemini", "augment"],
     )
     def test_check_hooks_not_configured_json(self, tmp_path, ide_name):
         """Verify check_hooks_configured returns False when ai-guardian is absent."""
@@ -685,8 +675,8 @@ class TestIDESetupParametrized:
 
     @pytest.mark.parametrize(
         "ide_name",
-        ["claude", "windsurf", "codex", "augment"],
-        ids=["claude", "windsurf", "codex", "augment"],
+        ["claude", "windsurf", "augment"],
+        ids=["claude", "windsurf", "augment"],
     )
     def test_setup_ide_hooks_json_new(self, tmp_path, ide_name):
         """Setting up hooks in an empty directory creates valid JSON config."""
@@ -733,8 +723,8 @@ class TestIDESetupParametrized:
 
     @pytest.mark.parametrize(
         "ide_name",
-        ["claude", "windsurf", "codex", "gemini", "augment", "cline", "kiro"],
-        ids=["claude", "windsurf", "codex", "gemini", "augment", "cline", "kiro"],
+        ["claude", "windsurf", "gemini", "augment", "cline", "kiro"],
+        ids=["claude", "windsurf", "gemini", "augment", "cline", "kiro"],
     )
     def test_setup_ide_hooks_dry_run(self, tmp_path, ide_name):
         """Dry-run mode returns success with DRY RUN and creates no files."""
@@ -753,8 +743,8 @@ class TestIDESetupParametrized:
 
     @pytest.mark.parametrize(
         "ide_name",
-        ["claude", "codex", "augment"],
-        ids=["claude", "codex", "augment"],
+        ["claude", "augment"],
+        ids=["claude", "augment"],
     )
     def test_setup_ide_hooks_json_force_overwrite(self, tmp_path, ide_name):
         """Force overwrite of existing JSON hooks creates backup."""
@@ -775,24 +765,6 @@ class TestIDESetupParametrized:
         assert backup_file.exists()
 
     # ── setup_ide_hooks already-configured (JSON-based) ──────────────────
-
-    @pytest.mark.parametrize(
-        "ide_name",
-        ["codex"],
-        ids=["codex"],
-    )
-    def test_setup_ide_hooks_json_already_configured(self, tmp_path, ide_name):
-        """Setup returns failure when hooks already configured without force."""
-        setup = IDESetup()
-        config_file = tmp_path / "config.json"
-        config_file.write_text(json.dumps(self._CONFIGURED_CONFIGS[ide_name]))
-        ide_override = self._make_ide_config_override(setup, ide_name, config_file)
-
-        with mock.patch.object(setup, "IDE_CONFIGS", ide_override):
-            success, message = setup.setup_ide_hooks(ide_name, dry_run=False, force=False)
-
-        assert success is False
-        assert "already configured" in message
 
     # ── merge_hooks new (basic IDEs) ─────────────────────────────────────
 
@@ -953,22 +925,41 @@ class TestConfigDirEnvironmentVariable:
 class TestCodexSetup:
     """Test cases for Codex IDE setup."""
 
+    _CONFIGURED_TOML = """
+[[hooks.PreToolUse]]
+matcher = ".*"
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "ai-guardian"
+timeout = 30
+""".strip()
+
+    _NOT_CONFIGURED_TOML = """
+[[hooks.PreToolUse]]
+matcher = ".*"
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "other-tool"
+timeout = 30
+""".strip()
+
     def test_codex_hooks_use_regex_matcher(self):
         """Verify Codex PreToolUse/PostToolUse use regex matcher '.*'."""
         hooks = IDESetup.IDE_CONFIGS["codex"]["hooks"]
         assert hooks["PreToolUse"][0]["matcher"] == ".*"
         assert hooks["PostToolUse"][0]["matcher"] == ".*"
+        assert hooks["PermissionRequest"][0]["matcher"] == ".*"
         assert "matcher" not in hooks["UserPromptSubmit"][0]
 
     def test_codex_hooks_have_timeout(self):
         """Verify Codex hooks include timeout field."""
         hooks = IDESetup.IDE_CONFIGS["codex"]["hooks"]
-        for event in ["UserPromptSubmit", "PreToolUse", "PostToolUse"]:
+        for event in ["UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse"]:
             hook_entry = hooks[event][0]["hooks"][0]
             assert hook_entry["timeout"] == 30
 
     def test_merge_hooks_codex_preserves_other_hooks(self, tmp_path):
-        """Test that merging Codex hooks preserves existing non-ai-guardian hooks."""
+        """Legacy hooks.json merge still preserves existing non-ai-guardian hooks."""
         setup = IDESetup()
         existing_config = {
             'hooks': {
@@ -988,6 +979,69 @@ class TestCodexSetup:
         assert pre_tool_hooks[0]['command'] == 'ai-guardian'
         assert pre_tool_hooks[1]['command'] == 'other-tool'
         assert len(warnings) > 0
+
+    def test_check_hooks_configured_toml(self, tmp_path):
+        setup = IDESetup()
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(self._CONFIGURED_TOML)
+        assert setup.check_hooks_configured(config_file, "codex") is True
+
+    def test_check_hooks_not_configured_toml(self, tmp_path):
+        setup = IDESetup()
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(self._NOT_CONFIGURED_TOML)
+        assert setup.check_hooks_configured(config_file, "codex") is False
+
+    def test_setup_codex_hooks_new(self, tmp_path):
+        setup = IDESetup()
+        config_file = tmp_path / "config.toml"
+        ide_override = TestIDESetupParametrized._make_ide_config_override(setup, "codex", config_file)
+
+        with mock.patch.object(setup, "IDE_CONFIGS", ide_override):
+            success, message = setup.setup_ide_hooks("codex", dry_run=False, force=False)
+
+        assert success is True
+        content = config_file.read_text()
+        assert "# BEGIN ai-guardian Codex hooks" in content
+        assert "[[hooks.UserPromptSubmit]]" in content
+        assert "[[hooks.PermissionRequest]]" in content
+
+    def test_setup_codex_hooks_dry_run(self, tmp_path):
+        setup = IDESetup()
+        config_file = tmp_path / "config.toml"
+        ide_override = TestIDESetupParametrized._make_ide_config_override(setup, "codex", config_file)
+
+        with mock.patch.object(setup, "IDE_CONFIGS", ide_override):
+            success, message = setup.setup_ide_hooks("codex", dry_run=True, force=False)
+
+        assert success is True
+        assert "[DRY RUN]" in message
+        assert "[[hooks.PermissionRequest]]" in message
+        assert not config_file.exists()
+
+    def test_setup_codex_hooks_force_overwrite_creates_backup(self, tmp_path):
+        setup = IDESetup()
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(self._CONFIGURED_TOML)
+        ide_override = TestIDESetupParametrized._make_ide_config_override(setup, "codex", config_file)
+
+        with mock.patch.object(setup, "IDE_CONFIGS", ide_override):
+            success, message = setup.setup_ide_hooks("codex", dry_run=False, force=True)
+
+        assert success is True
+        assert config_file.with_suffix(".toml.backup").exists()
+
+    def test_setup_codex_hooks_already_configured(self, tmp_path):
+        setup = IDESetup()
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(self._CONFIGURED_TOML)
+        ide_override = TestIDESetupParametrized._make_ide_config_override(setup, "codex", config_file)
+
+        with mock.patch.object(setup, "IDE_CONFIGS", ide_override):
+            success, message = setup.setup_ide_hooks("codex", dry_run=False, force=False)
+
+        assert success is False
+        assert "already configured" in message
 
 
 class TestGeminiSetup:

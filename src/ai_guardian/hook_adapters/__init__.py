@@ -33,6 +33,7 @@ ADAPTER_CLASSES = [
     CursorAdapter,       # cursor_version or hook_name
     KiroAdapter,         # kiro_hook_type or kiro_version
     AugmentAdapter,      # is_mcp_tool + tool_name
+    CodexAdapter,        # PermissionRequest / Codex-specific fields
     ClaudeCodeAdapter,   # PascalCase hook_event_name (fallback)
 ]
 
@@ -91,6 +92,7 @@ def get_adapter_by_ide_type(ide_type) -> HookAdapter:
 
     _IDE_TYPE_MAP = {
         IDEType.CLAUDE_CODE: ClaudeCodeAdapter,
+        IDEType.CODEX: CodexAdapter,
         IDEType.CURSOR: CursorAdapter,
         IDEType.GITHUB_COPILOT: CopilotAdapter,
         IDEType.GEMINI_CLI: GeminiCLIAdapter,

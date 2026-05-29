@@ -186,6 +186,30 @@ class TestDiscoverServers:
 
         assert len(servers) == 0
 
+    def test_discover_from_codex_toml(self, tmp_path):
+        """Discover MCP servers from Codex config.toml."""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(
+            """
+[mcp_servers.ai-guardian]
+command = "ai-guardian"
+args = ["mcp-server"]
+
+[mcp_servers.custom]
+command = "uvx"
+args = ["custom-mcp@1.2.3"]
+            """.strip()
+        )
+
+        auditor = MCPAuditor()
+        with patch.object(auditor, "_get_config_paths", return_value=[str(config_file)]):
+            with patch.object(auditor, "_check_trust", return_value=True):
+                servers = auditor.discover_servers()
+
+        assert len(servers) == 2
+        names = {server.name for server in servers}
+        assert names == {"ai-guardian", "custom"}
+
 
 # ---------------------------------------------------------------------------
 # Config Audit Tests
@@ -690,7 +714,7 @@ class TestIDELabel:
         assert MCPAuditor.ide_label("~/.windsurf/mcp.json") == "Windsurf"
 
     def test_codex(self):
-        assert MCPAuditor.ide_label("codex.json") == "Codex"
+        assert MCPAuditor.ide_label("~/.codex/config.toml") == "Codex"
 
     def test_unknown(self):
         assert MCPAuditor.ide_label("/some/other/file.json") == "Unknown"

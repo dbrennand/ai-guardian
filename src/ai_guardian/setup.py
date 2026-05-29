@@ -20,6 +20,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ai_guardian.config_utils import get_cache_dir, get_config_dir
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
+    import tomli as tomllib  # type: ignore
+
 
 def _resolve_binary_path() -> str:
     """Resolve absolute path to ai-guardian binary at setup time."""
@@ -62,6 +67,67 @@ def _notify_daemon_reload():
             print("Daemon reloaded with new configuration")
     except Exception:
         pass
+
+
+_CODEX_MANAGED_HOOKS_BEGIN = "# BEGIN ai-guardian Codex hooks"
+_CODEX_MANAGED_HOOKS_END = "# END ai-guardian Codex hooks"
+_CODEX_MANAGED_MCP_BEGIN = "# BEGIN ai-guardian Codex MCP"
+_CODEX_MANAGED_MCP_END = "# END ai-guardian Codex MCP"
+
+
+def _strip_managed_block(text: str, begin_marker: str, end_marker: str) -> str:
+    """Remove a previously managed text block delimited by comment markers."""
+    start = text.find(begin_marker)
+    if start == -1:
+        return text
+    end = text.find(end_marker, start)
+    if end == -1:
+        return text[:start].rstrip() + "\n"
+    end += len(end_marker)
+    stripped = (text[:start] + text[end:]).strip()
+    return f"{stripped}\n" if stripped else ""
+
+
+def _toml_serialize(value: Any) -> str:
+    """Serialize a small subset of TOML values used by Codex config helpers."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, list):
+        return "[" + ", ".join(_toml_serialize(v) for v in value) + "]"
+    return json.dumps(str(value))
+
+
+def _render_codex_hooks_toml(hooks_config: Dict[str, List[Dict]]) -> str:
+    """Render ai-guardian's managed Codex hooks as inline TOML tables."""
+    lines = [_CODEX_MANAGED_HOOKS_BEGIN]
+    for event_name, hook_entries in hooks_config.items():
+        for entry in hook_entries:
+            lines.append(f"[[hooks.{event_name}]]")
+            matcher = entry.get("matcher")
+            if matcher is not None:
+                lines.append(f"matcher = {_toml_serialize(matcher)}")
+            for hook in entry.get("hooks", []):
+                lines.append(f"[[hooks.{event_name}.hooks]]")
+                for key in ("type", "command", "timeout", "statusMessage"):
+                    if key in hook:
+                        lines.append(f"{key} = {_toml_serialize(hook[key])}")
+            lines.append("")
+    lines.append(_CODEX_MANAGED_HOOKS_END)
+    return "\n".join(lines).strip() + "\n"
+
+
+def _render_codex_mcp_toml(command: str, args: List[str]) -> str:
+    """Render ai-guardian's Codex MCP server block as inline TOML."""
+    lines = [
+        _CODEX_MANAGED_MCP_BEGIN,
+        "[mcp_servers.ai-guardian]",
+        f"command = {_toml_serialize(command)}",
+        f"args = {_toml_serialize(args)}",
+        _CODEX_MANAGED_MCP_END,
+    ]
+    return "\n".join(lines).strip() + "\n"
 
 
 class IDESetup:
@@ -175,9 +241,10 @@ class IDESetup:
         },
         "codex": {
             "name": "OpenAI Codex",
-            "config_path": "~/.codex/hooks.json",
+            "config_path": "~/.codex/config.toml",
             "config_dir_env_var": None,
-            "config_filename": "hooks.json",
+            "config_filename": "config.toml",
+            "legacy_config_path": "~/.codex/hooks.json",
             "hooks": {
                 "UserPromptSubmit": [
                     {
@@ -186,7 +253,6 @@ class IDESetup:
                                 "type": "command",
                                 "command": "ai-guardian",
                                 "timeout": 30,
-                                "statusMessage": "🛡️ Scanning prompt..."
                             }
                         ]
                     }
@@ -200,6 +266,19 @@ class IDESetup:
                                 "command": "ai-guardian",
                                 "timeout": 30,
                                 "statusMessage": "🛡️ Checking tool permissions..."
+                            }
+                        ]
+                    }
+                ],
+                "PermissionRequest": [
+                    {
+                        "matcher": ".*",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "ai-guardian",
+                                "timeout": 30,
+                                "statusMessage": "🛡️ Checking approval request..."
                             }
                         ]
                     }
@@ -424,6 +503,140 @@ class IDESetup:
         """Initialize IDE setup manager."""
         self._last_merged_config: Optional[Dict] = None
 
+    def get_legacy_config_path(self, ide_type: str) -> Optional[str]:
+        """Return the legacy config path for IDEs that support migration checks."""
+        ide_config = self.IDE_CONFIGS.get(ide_type, {})
+        legacy_path = ide_config.get("legacy_config_path")
+        return str(legacy_path) if legacy_path else None
+
+    def _count_claude_style_hooks(self, config: Dict, hook_names: List[str]) -> int:
+        """Count configured Claude-style hooks in a parsed config mapping."""
+        hooks = config.get("hooks", {})
+        count = 0
+        for hook_name in hook_names:
+            hook_list = hooks.get(hook_name, [])
+            if not isinstance(hook_list, list):
+                continue
+            for hook_entry in hook_list:
+                if not isinstance(hook_entry, dict):
+                    continue
+                for hook in hook_entry.get("hooks", []):
+                    if isinstance(hook, dict) and _is_ai_guardian_command(hook.get("command", "")):
+                        count += 1
+                        break
+                else:
+                    continue
+                break
+        return count
+
+    def _count_codex_hooks(self, config_path: Path) -> int:
+        """Count configured Codex hooks in config.toml or legacy hooks.json."""
+        if config_path.exists():
+            try:
+                if config_path.suffix == ".json":
+                    with open(config_path, "r", encoding="utf-8") as f:
+                        config = json.load(f)
+                    return self._count_claude_style_hooks(
+                        config,
+                        ["UserPromptSubmit", "PreToolUse", "PostToolUse"],
+                    )
+
+                with open(config_path, "rb") as f:
+                    config = tomllib.load(f)
+                count = self._count_claude_style_hooks(
+                    config,
+                    ["UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse"],
+                )
+                if count:
+                    return count
+            except Exception:
+                return 0
+
+        legacy_path = self.get_legacy_config_path("codex")
+        if legacy_path:
+            legacy_file = Path(legacy_path).expanduser()
+            if legacy_file.exists():
+                try:
+                    with open(legacy_file, "r", encoding="utf-8") as f:
+                        config = json.load(f)
+                    return self._count_claude_style_hooks(
+                        config,
+                        ["UserPromptSubmit", "PreToolUse", "PostToolUse"],
+                    )
+                except Exception:
+                    return 0
+        return 0
+
+    def _setup_codex_hooks(
+        self,
+        ide_config: Dict,
+        config_path: Path,
+        dry_run: bool = False,
+    ) -> Tuple[bool, str]:
+        """Setup Codex hooks in ~/.codex/config.toml without rewriting user config."""
+        ide_name = ide_config["name"]
+        existing_text = ""
+
+        if config_path.exists():
+            try:
+                with open(config_path, "rb") as f:
+                    tomllib.load(f)
+                existing_text = config_path.read_text(encoding="utf-8")
+            except Exception as e:
+                return False, f"Invalid TOML in {config_path}: {e}"
+
+        abs_path = _resolve_binary_path()
+        resolved_hooks = _substitute_command(ide_config["hooks"], abs_path)
+        managed_block = _render_codex_hooks_toml(resolved_hooks)
+        base_text = _strip_managed_block(
+            existing_text,
+            _CODEX_MANAGED_HOOKS_BEGIN,
+            _CODEX_MANAGED_HOOKS_END,
+        ).rstrip()
+        merged_text = f"{base_text}\n\n{managed_block}" if base_text else managed_block
+
+        self._last_merged_config = {"hooks": resolved_hooks}
+
+        if dry_run:
+            message = f"[DRY RUN] Would configure {ide_name} hooks at {config_path}:\n"
+            message += merged_text
+            return True, message
+
+        if config_path.exists():
+            backup_path = self.backup_config(config_path)
+            if backup_path:
+                print(f"✓ Backup created: {backup_path}", file=sys.stderr)
+
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(merged_text if merged_text.endswith("\n") else f"{merged_text}\n", encoding="utf-8")
+
+        gitleaks_installed, gitleaks_message = self.verify_gitleaks_installed()
+        message = f"✓ Successfully configured {ide_name} hooks at {config_path}\n"
+        message += f"\n  {gitleaks_message}\n"
+
+        legacy_path = self.get_legacy_config_path("codex")
+        if legacy_path and Path(legacy_path).expanduser().exists():
+            message += (
+                "\n  Note: Detected legacy Codex hooks at ~/.codex/hooks.json.\n"
+                "  New installs now use ~/.codex/config.toml.\n"
+            )
+
+        if not gitleaks_installed:
+            message += (
+                "\n  ⚠️  WARNING: Secret scanning will be disabled without Gitleaks!\n"
+                "      AI Guardian requires Gitleaks for secret detection.\n"
+            )
+
+        message += "\n  Next steps:\n"
+        step = 1
+        if not gitleaks_installed:
+            message += f"  {step}. Install Gitleaks (see above)\n"
+            step += 1
+        message += f"  {step}. Restart {ide_name} for changes to take effect\n"
+        step += 1
+        message += f"  {step}. Test with: echo '{{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"test\"}}' | ai-guardian\n"
+        return True, message
+
     def verify_gitleaks_installed(self) -> Tuple[bool, str]:
         """
         Check if Gitleaks binary is installed and accessible.
@@ -629,11 +842,11 @@ class IDESetup:
             return existing_config, warnings
 
         elif ide_type == "codex":
-            # Codex: same nested structure as Claude Code (hooks.json)
+            # Legacy Codex hooks.json: same nested structure as Claude Code
             if "hooks" not in existing_config:
                 existing_config["hooks"] = {}
 
-            for hook_name in ["UserPromptSubmit", "PreToolUse", "PostToolUse"]:
+            for hook_name in ["UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse"]:
                 if hook_name not in ai_guardian_hooks:
                     continue
 
@@ -789,7 +1002,13 @@ class IDESetup:
         """
         try:
             if not config_path.exists():
-                return False
+                legacy_path = self.get_legacy_config_path(ide_type)
+                if not legacy_path:
+                    return False
+                legacy_file = Path(legacy_path).expanduser()
+                if not legacy_file.exists():
+                    return False
+                config_path = legacy_file
 
             # Extension-based hooks (AiderDesk, OpenClaw): check directory for index.ts
             ide_config = self.IDE_CONFIGS.get(ide_type, {})
@@ -820,10 +1039,13 @@ class IDESetup:
                             pass
                 return False
 
+            if ide_type == "codex":
+                return self._count_codex_hooks(config_path) > 0
+
             with open(config_path, 'r', encoding='utf-8') as f:
                 config = json.load(f)
 
-            if ide_type in ("claude", "codex"):
+            if ide_type == "claude":
                 hooks = config.get("hooks", {})
                 # Check if UserPromptSubmit, PreToolUse, or PostToolUse hooks contain ai-guardian
                 for hook_name in ["UserPromptSubmit", "PreToolUse", "PostToolUse"]:
@@ -1066,6 +1288,9 @@ class IDESetup:
             # Script-based IDEs (Cline, ZooCode): create executable scripts
             if ide_config.get("script_based"):
                 return self._setup_script_based_hooks(ide_type, ide_config, config_path, dry_run)
+
+            if ide_type == "codex":
+                return self._setup_codex_hooks(ide_config, config_path, dry_run)
 
             # Load existing config or create new
             existing_config = {}
@@ -2292,10 +2517,11 @@ def setup_hooks(
         detected_ides = setup.list_detected_ides()
 
         if not detected_ides:
-            print("Error: No IDE detected. Please install Claude Code or Cursor IDE.", file=sys.stderr)
+            print("Error: No IDE detected. Please install a supported IDE such as Claude Code, Cursor, or Codex.", file=sys.stderr)
             print("\nSupported IDEs:", file=sys.stderr)
             print("  - Claude Code: https://claude.ai/code", file=sys.stderr)
             print("  - Cursor: https://cursor.sh", file=sys.stderr)
+            print("  - Codex: https://developers.openai.com/codex", file=sys.stderr)
             return False
 
         elif len(detected_ides) == 1:
@@ -2512,8 +2738,9 @@ _MCP_IDE_CONFIGS = {
         "skill_dir": ".github/skills",
     },
     "codex": {
-        "config_file": "codex.json",
-        "config_key": "mcpServers",
+        "config_file": "~/.codex/config.toml",
+        "config_key": "mcp_servers",
+        "config_format": "toml",
         "skill_dir": ".codex/skills",
     },
     "windsurf": {
@@ -2595,6 +2822,30 @@ def _install_mcp_config(setup: IDESetup, ide_type: str, dry_run: bool = False) -
         print(f"  MCP: Would add ai-guardian MCP server to {config_path}")
         return
 
+    if mcp_ide.get("config_format") == "toml":
+        existing_text = ""
+        if config_path.exists():
+            try:
+                with open(config_path, "rb") as f:
+                    tomllib.load(f)
+                existing_text = config_path.read_text(encoding="utf-8")
+            except Exception:
+                print(f"  MCP: Could not parse {config_path}, skipping MCP setup")
+                return
+
+        abs_path = _resolve_binary_path()
+        managed_block = _render_codex_mcp_toml(abs_path, list(_MCP_SERVER_ENTRY["args"]))
+        base_text = _strip_managed_block(
+            existing_text,
+            _CODEX_MANAGED_MCP_BEGIN,
+            _CODEX_MANAGED_MCP_END,
+        ).rstrip()
+        merged_text = f"{base_text}\n\n{managed_block}" if base_text else managed_block
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(merged_text if merged_text.endswith("\n") else f"{merged_text}\n", encoding="utf-8")
+        print(f"  MCP: Added ai-guardian MCP server to {config_path}")
+        return
+
     # Read or create config file
     config = {}
     if config_path.exists():
@@ -2652,6 +2903,23 @@ def _remove_mcp_config(setup: IDESetup, ide_type: str, dry_run: bool = False) ->
 
     if not config_path.exists():
         print("  MCP: No config file found, nothing to remove")
+        return
+
+    if mcp_ide.get("config_format") == "toml":
+        try:
+            existing_text = config_path.read_text(encoding="utf-8")
+        except OSError:
+            return
+        updated_text = _strip_managed_block(
+            existing_text,
+            _CODEX_MANAGED_MCP_BEGIN,
+            _CODEX_MANAGED_MCP_END,
+        )
+        if updated_text == existing_text:
+            print("  MCP: ai-guardian MCP server not found in config")
+            return
+        config_path.write_text(updated_text, encoding="utf-8")
+        print(f"  MCP: Removed ai-guardian MCP server from {config_path}")
         return
 
     try:

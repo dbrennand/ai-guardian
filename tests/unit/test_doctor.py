@@ -237,6 +237,49 @@ class TestCheckHooks:
                 assert result.status == CheckStatus.WARN
                 assert "1/3" in result.message
 
+    def test_codex_hooks_configured(self, _isolate_config_dir, tmp_path):
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir()
+        config_path = codex_dir / "config.toml"
+        config_path.write_text(
+            """
+[[hooks.UserPromptSubmit]]
+[[hooks.UserPromptSubmit.hooks]]
+type = "command"
+command = "ai-guardian"
+timeout = 30
+
+[[hooks.PreToolUse]]
+matcher = ".*"
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "ai-guardian"
+timeout = 30
+
+[[hooks.PermissionRequest]]
+matcher = ".*"
+[[hooks.PermissionRequest.hooks]]
+type = "command"
+command = "ai-guardian"
+timeout = 30
+
+[[hooks.PostToolUse]]
+matcher = ".*"
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = "ai-guardian"
+timeout = 30
+            """.strip()
+        )
+
+        with mock.patch("ai_guardian.setup.IDESetup.list_detected_ides", return_value=["codex"]):
+            with mock.patch("ai_guardian.setup.IDESetup.get_config_path", return_value=str(config_path)):
+                with mock.patch("ai_guardian.setup.IDESetup.get_legacy_config_path", return_value=None):
+                    doctor = Doctor()
+                    result = doctor.check_hooks()
+                    assert result.status == CheckStatus.PASS
+                    assert "4/4" in result.message
+
 
     def test_hooks_configured_absolute_path(self, _isolate_config_dir, tmp_path):
         """Doctor recognizes hooks with absolute paths (issue #797)."""

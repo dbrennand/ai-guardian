@@ -160,6 +160,7 @@ ai-guardian setup                    # Auto-detect IDE
 ai-guardian setup --ide claude       # Claude Code
 ai-guardian setup --ide cursor       # Cursor IDE
 ai-guardian setup --ide copilot      # GitHub Copilot
+ai-guardian setup --ide codex        # OpenAI Codex (~/.codex/config.toml)
 ai-guardian setup --dry-run          # Preview changes
 ai-guardian setup --ide claude --mcp # Enable MCP security advisor (opt-in)
 ai-guardian setup --remote-config-url https://example.com/policy.json
@@ -322,4 +323,3 @@ Apache 2.0 - see [LICENSE](https://github.com/itdove/ai-guardian/blob/main/LICEN
 - [Cursor](https://cursor.sh) - AI code editor
 - [LeakTK](https://github.com/leaktk/patterns) - Community secret detection patterns
 - [Hermes Security Patterns](https://github.com/fullsend-ai/experiments/tree/main/hermes-security-patterns) - Security research
-

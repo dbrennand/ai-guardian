@@ -22,6 +22,7 @@ from textual.widgets import Static, Input, Button, Select, TextArea
 HOOK_EVENTS = [
     ("UserPromptSubmit", "UserPromptSubmit"),
     ("PreToolUse", "PreToolUse"),
+    ("PermissionRequest", "PermissionRequest"),
     ("PostToolUse", "PostToolUse"),
 ]
 
@@ -41,6 +42,7 @@ IDE_OPTIONS = [
     ("Claude Code", "claude"),
     ("Cursor", "cursor"),
     ("GitHub Copilot", "copilot"),
+    ("Codex", "codex"),
 ]
 
 
@@ -68,6 +70,19 @@ def build_hook_data(hook_event, tool_name=None, file_path=None, content=""):
             parameters["command"] = content
         elif not parameters.get("file_path"):
             parameters["file_path"] = file_path or ""
+        hook_data["tool_use"] = {
+            "name": tool_name or "Read",
+            "parameters": parameters,
+        }
+    elif hook_event == "PermissionRequest":
+        parameters = {}
+        if file_path:
+            parameters["file_path"] = file_path
+        if tool_name == "Bash":
+            parameters["command"] = content
+        elif file_path:
+            parameters["path"] = file_path
+        hook_data["approval_request_type"] = tool_name or "Read"
         hook_data["tool_use"] = {
             "name": tool_name or "Read",
             "parameters": parameters,

@@ -16,6 +16,7 @@ AI Guardian includes an MCP (Model Context Protocol) server that exposes read-on
 
 ```bash
 ai-guardian setup --ide claude --mcp
+ai-guardian setup --ide codex --mcp
 ```
 
 This adds the MCP server to your IDE config and enables it in `ai-guardian.json`.
@@ -33,6 +34,14 @@ Add to `~/.claude.json` (or `~/.claude/settings.json`):
     }
   }
 }
+```
+
+For Codex, add to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.ai-guardian]
+command = "ai-guardian"
+args = ["mcp-server"]
 ```
 
 ### Via uvx (no install needed)
@@ -54,6 +63,7 @@ Add to `~/.claude.json` (or `~/.claude/settings.json`):
 |-----|----------------|
 | Claude Code | `~/.claude/settings.json` or `~/.claude.json` → `mcpServers` |
 | Cursor | `~/.cursor/mcp.json` |
+| OpenAI Codex | `~/.codex/config.toml` → `mcp_servers` |
 | Windsurf | `~/.windsurf/mcp.json` |
 
 ## Enable / Disable
@@ -63,6 +73,8 @@ The MCP server is controlled by IDE config. Install/uninstall via:
 ```bash
 ai-guardian setup --ide claude --mcp      # Install
 ai-guardian setup --ide claude --no-mcp   # Uninstall
+ai-guardian setup --ide codex --mcp       # Install for Codex
+ai-guardian setup --ide codex --no-mcp    # Uninstall for Codex
 ```
 
 ## Proactive Level
