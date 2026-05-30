@@ -330,7 +330,46 @@ class MultiDaemonClient:
             "by_severity": report.by_severity,
             "resolved": report.resolved_count,
             "unresolved": report.unresolved_count,
+            "cumulative_total": report.cumulative_total,
+            "cumulative_by_type": report.cumulative_by_type,
+            "cumulative_since": report.cumulative_since,
         }
+
+    def get_audit(
+        self,
+        target: DaemonTarget,
+        since: str = "30d",
+        until: Optional[str] = None,
+        violation_type: Optional[str] = None,
+        severity: Optional[str] = None,
+    ) -> Optional[dict]:
+        """Get audit report from a daemon."""
+        if target.runtime == "local":
+            return self._local_audit(since, until, violation_type, severity)
+        params = f"?since={since}"
+        if until:
+            params += f"&until={until}"
+        if violation_type:
+            params += f"&type={violation_type}"
+        if severity:
+            params += f"&severity={severity}"
+        return self._rest_request(target, "GET", f"/api/audit{params}")
+
+    @staticmethod
+    def _local_audit(
+        since: str = "30d",
+        until: Optional[str] = None,
+        violation_type: Optional[str] = None,
+        severity: Optional[str] = None,
+    ) -> dict:
+        import json as _json
+        from ai_guardian.audit import AuditComputer, format_audit_json
+        computer = AuditComputer(
+            since=since, until=until,
+            violation_type=violation_type, severity=severity,
+        )
+        report = computer.compute()
+        return _json.loads(format_audit_json(report))
 
     def export_support(self, target: DaemonTarget) -> Optional[str]:
         """Export support bundle."""

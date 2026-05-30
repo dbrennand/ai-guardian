@@ -9,6 +9,97 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Compliance audit in metrics** (Issue #476)
+  - `ai-guardian metrics` extended with `--html`, `--until`, `--severity` flags
+  - `--html` outputs self-contained HTML audit report with inline CSS and SVG charts
+  - `--until` enables bounded date ranges (e.g. `--since 2026-04-01 --until 2026-05-01`)
+  - `--severity` filters by violation severity level
+  - Audit report sections: trend comparison with previous period,
+    resolution metrics (rate, avg time), compliance posture, security
+    posture assessment (GOOD/FAIR/NEEDS ATTENTION)
+  - REST API: `GET /api/audit` endpoint with query parameters
+  - TUI/Web: Metrics panel extended to "Metrics & Audit" with security
+    posture, trend comparison, resolution metrics, compliance summary,
+    and Export HTML/JSON/CSV buttons with Open Folder / browser download
+  - Tray menu: "Metrics" renamed to "Metrics & Audit"
+
+### Fixed
+
+- **Aadhaar PII false positive on UUID all-zeros** (Issue #876)
+  - Added `aadhaar_check` post-match validator following the credit card validation pattern
+  - Rejects numbers starting with 0 or 1 (real Aadhaar starts with 2-9)
+  - Rejects all-same-digit patterns (e.g., 0000-0000-0000)
+  - PII block messages now include actionable fix guidance for false positives
+
+- **Image redaction too weak** (Issue #870)
+  - Pixelate strategy now uses max 2x2 intermediate size (was w/8 x h/8), making text unreadable at any zoom
+  - Blur strategy minimum radius increased from 10 to 20, divisor changed from /3 to /2 for stronger blur
+  - Default redaction strategy changed from `blur` to `blackout` (safest — fully opaque rectangles)
+  - Updated default in CLI, MCP server, and sanitizer to `blackout`
+
+- **Metrics total stuck at 1000** (Issue #853)
+  - Added running violation counter (`violation_counters.json`) independent of log rotation
+  - Counter increments on every violation and persists across daemon restarts
+  - `ai-guardian metrics` now shows cumulative totals alongside time-filtered data
+  - `ai-guardian metrics --reset` resets counters to current log file counts (not zero)
+  - REST API `/api/metrics` and MCP `get_metrics` include `cumulative_total`, `cumulative_by_type`, `cumulative_since`
+  - TUI console: metrics panel shows cumulative totals + reset button with confirmation
+  - Web console: metrics page shows cumulative totals + reset button with confirmation
+
+### Added
+
+- **NiceGUI fallback for tray plugin parameter popup** (Issue #862)
+  - When tkinter is unavailable, tray plugin forms now open as a browser-based NiceGUI form (Python 3.10+)
+  - Cascade order: tkinter (native popup) → NiceGUI (browser form) → Textual (terminal prompt)
+  - All parameter types supported: string, int, boolean, choice, combobox, path-file, path-dir
+  - NiceGUI runs a local server on a random port and auto-opens the default browser
+  - Environment overrides: `AI_GUARDIAN_NO_TKINTER=1` / `AI_GUARDIAN_NO_NICEGUI=1` to skip tiers
+  - install.sh updated to document the three-tier fallback
+
+- **Directory sanitization** (Issue #857)
+  - `ai-guardian sanitize /path/to/dir --output-dir /path/to/sanitized` recursively sanitizes all files
+  - Text files redacted (secrets, PII, threats); image files OCR-scanned and redacted; binary files copied as-is
+  - Preserves directory structure in output
+  - `--include` / `--exclude` glob patterns for filtering files (repeatable)
+  - `--no-images` flag to skip OCR processing (copy images as-is)
+  - `--force` flag to write to an existing output directory
+  - `--summary` shows per-file redaction counts and totals
+  - Skips `.git`, `node_modules`, `__pycache__`, `.venv` directories automatically
+  - New `sanitize_directory` MCP tool for AI agent integration
+  - Tray quick actions: "Sanitize File..." and "Sanitize Directory..." in global plugin menu
+
+- **`--redact-strategy` flag for image sanitization** (Issue #856)
+  - `ai-guardian sanitize image.png --redact-strategy blackout` — choose blur, blackout, or pixelate
+  - Default remains `blur` for backward compatibility
+  - Supported in CLI, MCP `sanitize_directory` tool, and tray quick-action plugins
+  - Tray plugins show a dropdown with the three strategies
+
+- **Image OCR scanning in `scan_directory` and `sanitize`** (Issue #855)
+  - `ai-guardian scan` and the `scan_directory` MCP tool now include image files (PNG, JPEG, etc.) via OCR
+  - Extracted text is scanned through all existing detectors (secrets, PII, SSRF, prompt injection, unicode)
+  - Image findings tagged with `source_type: image_ocr` in details for easy identification
+  - Enabled by default when `rapidocr-onnxruntime` is installed; silently skipped otherwise
+  - Respects `image_scanning` config section (enabled, max_image_size_mb, ignore_files)
+  - `ai-guardian sanitize` now handles image files — OCR detects text regions, redacts those containing secrets/PII
+  - Added `--output` / `-o` flag to `sanitize` for writing to a file (required for image output)
+
+- **Default bundled tray plugins** (Issue #831)
+  - Ships `default-global.json` and `default-daemon.json` with useful built-in commands
+  - Global: Quick Actions submenu (Scan Directory, Check for Updates) + Open Documentation
+  - Per-daemon: Maintenance submenu (Reload Config, Install Scanner, View Doctor)
+  - Nested submenus for logical grouping
+  - All commands work on macOS and Linux (platform maps)
+  - Installed automatically on first run, `ai-guardian setup`, or daemon start
+  - Users can customize or remove from `~/.config/ai-guardian/tray-plugins/`
+
+- **`--ide` CLI parameter for deterministic adapter selection** (Issue #849)
+  - `ai-guardian --ide <name>` explicitly declares which IDE adapter to use
+  - Eliminates adapter mis-detection bugs like #847 (field-matching heuristics)
+  - `ai-guardian setup` now writes `--ide <name>` into hook commands automatically
+  - Re-running `ai-guardian setup --ide <name>` upgrades existing hooks
+  - Auto-detection preserved as fallback for backward compatibility
+  - Works with both direct CLI and daemon-forwarded hook processing
+
 - **Directional immutable — tighten-only config fields** (Issue #829)
   - New `immutable: "tighten-only"` mode for config sections
   - Lower-level configs can make settings stricter but not more permissive

@@ -369,7 +369,11 @@ class DaemonTray:
             pystray.MenuItem("Restart", self._on_restart_tray),
             pystray.MenuItem("Quit", self._on_quit),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("About", self._on_about),
+            pystray.MenuItem("About", self._on_about,
+                             enabled=lambda _: any(
+                                 t.status in ("running", "paused")
+                                 for t in self._targets
+                             )),
         )
         self._icon = pystray.Icon(
             "ai-guardian", self._create_icon(), "AI Guardian Tray", menu
@@ -732,6 +736,30 @@ class DaemonTray:
         return [sys.executable, "-m", "ai_guardian"] + list(args)
 
     @staticmethod
+    def _resolve_plugin_ai_guardian(command_str, run_on_target, target):
+        """Replace bare ``ai-guardian`` with the tray's Python interpreter.
+
+        Skipped for remote targets (container / kubernetes) where the
+        command must resolve via PATH on the remote host.
+        """
+        import shlex
+        import sys
+
+        is_remote = (
+            run_on_target and target
+            and getattr(target, "runtime", "local")
+            in ("container", "kubernetes")
+        )
+        if is_remote:
+            return command_str
+
+        stripped = command_str.lstrip()
+        if stripped == "ai-guardian" or stripped.startswith("ai-guardian "):
+            resolved = shlex.quote(sys.executable) + " -m ai_guardian"
+            return resolved + stripped[len("ai-guardian"):]
+        return command_str
+
+    @staticmethod
     def _launch_console(panel=None):
         """Launch the ai-guardian console in a new terminal window."""
         from ai_guardian.daemon.multi_client import _launch_in_terminal
@@ -830,15 +858,23 @@ class DaemonTray:
             return False
         return DaemonTray._is_web_console_alive(port_file)
 
+    _PANEL_TO_WEB_PATH = {
+        "panel-violations": "violations",
+        "panel-metrics": "metrics",
+        "panel-health-check": "health-check",
+    }
+
     @staticmethod
-    def _open_web_console(daemon_name: str = ""):
-        """Open the web console for a specific daemon."""
+    def _open_web_console(daemon_name: str = "", page: str = ""):
+        """Open the web console for a specific daemon and optional page."""
         import webbrowser
         from ai_guardian.config_utils import get_state_dir
         port_file = get_state_dir() / "web-console.port"
         try:
             port = int(port_file.read_text().strip())
             path = f"/{daemon_name}" if daemon_name else ""
+            if page:
+                path = f"{path}/{page}"
             webbrowser.open(f"http://127.0.0.1:{port}{path}")
         except (ValueError, OSError):
             pass
@@ -1238,6 +1274,7 @@ class DaemonTray:
         self._targets = targets
         self._apply_working_dirs()
         self._auto_select_target()
+        self._poll_plugins()
         self._refreshing_from_discovery = True
         self._dispatch_to_main(self._refresh_menu_and_clear_discovery_flag)
         logger.info(f"Discovery updated: {len(targets)} target(s) found")
@@ -1306,8 +1343,8 @@ class DaemonTray:
         from ai_guardian.daemon.working_dir import shorten_path
 
         status_icon = {
-            "running": "●", "paused": "◐", "stopped": "⚠",
-            "error": "✗", "unknown": "○",
+            "running": "●", "paused": "◐", "starting": "◌",
+            "stopped": "⚠", "error": "✗", "unknown": "○",
         }.get(target.status, "○")
         if target.runtime == "container" and target.container_engine:
             runtime = f" ({target.container_engine})"
@@ -1318,6 +1355,8 @@ class DaemonTray:
         label = f"{status_icon} {target.name}{runtime}"
         if target.status == "stopped":
             label += " — daemon not running"
+        elif target.status == "starting":
+            label += " — starting..."
         elif getattr(target, "working_dir", None):
             short = shorten_path(target.working_dir)
             if len(short) > 40:
@@ -1405,6 +1444,11 @@ class DaemonTray:
 
         def _open_panel(panel=None):
             def action(_, __):
+                if panel and self._has_web_console and self._is_web_console_ready():
+                    web_page = self._PANEL_TO_WEB_PATH.get(panel, "")
+                    daemon_name = self._targets[0].name if self._targets else ""
+                    self._open_web_console(daemon_name, web_page)
+                    return
                 if self._targets:
                     t = self._targets[0]
                     if self._multi_client:
@@ -1550,18 +1594,20 @@ class DaemonTray:
         return [
             pystray.MenuItem(_header_label, None, visible=_single_vis_refresh),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Console", _open_panel(), visible=_single_vis),
+            pystray.MenuItem("Console", _open_panel(),
+                             visible=_single_vis, enabled=_single_running),
             pystray.MenuItem("Web Console",
                              lambda _, __: self._open_web_console(
                                  self._targets[0].name if self._targets else ""
                              ),
                              visible=lambda _: (self._has_web_console
                                                 and self._is_single_daemon()
-                                                and self._is_web_console_ready())),
+                                                and self._is_web_console_ready()),
+                             enabled=_single_running),
             pystray.MenuItem("Violations", _open_panel("panel-violations"),
-                             visible=_single_vis),
-            pystray.MenuItem("Metrics", _open_panel("panel-metrics"),
-                             visible=_single_vis),
+                             visible=_single_vis, enabled=_single_running),
+            pystray.MenuItem("Metrics & Audit", _open_panel("panel-metrics"),
+                             visible=_single_vis, enabled=_single_running),
             pystray.MenuItem(
                 "Statistics",
                 pystray.Menu(
@@ -1578,7 +1624,8 @@ class DaemonTray:
                     pystray.Menu.SEPARATOR,
                     pystray.MenuItem(_s_config_reload, None),
                 ),
-                visible=_single_running,
+                visible=_single_vis,
+                enabled=_single_running,
             ),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(
@@ -1604,6 +1651,7 @@ class DaemonTray:
                     ),
                 ),
                 visible=lambda _: _single_vis(_) and self._is_mcp_for_current_target(),
+                enabled=_single_running,
             ),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(
@@ -1612,7 +1660,6 @@ class DaemonTray:
                 visible=_single_vis,
             ),
             pystray.MenuItem("Terminal", _open_shell(), visible=_single_vis),
-            pystray.MenuItem("Doctor", _open_doctor(), visible=_single_vis),
         ]
 
     def _build_single_daemon_daemon_items(self):
@@ -1660,7 +1707,7 @@ class DaemonTray:
             pystray.MenuItem("Stop daemon", _stop_action,
                              visible=_single_running),
             pystray.MenuItem("Restart daemon", _restart_action,
-                             visible=_single_running),
+                             visible=lambda _: self._is_single_daemon()),
         ]
 
     def _build_multi_daemon_menu_items(self):
@@ -1686,6 +1733,11 @@ class DaemonTray:
 
             def _mk_open_panel(panel=None, slot=idx):
                 def action(_, __):
+                    if panel and self._has_web_console and self._is_web_console_ready():
+                        web_page = self._PANEL_TO_WEB_PATH.get(panel, "")
+                        daemon_name = self._targets[slot].name if slot < len(self._targets) else ""
+                        self._open_web_console(daemon_name, web_page)
+                        return
                     if slot < len(self._targets):
                         t = self._targets[slot]
                         if self._multi_client:
@@ -1871,12 +1923,18 @@ class DaemonTray:
                 pystray.MenuItem(
                     make_label,
                     pystray.Menu(
-                        pystray.MenuItem("Console", _mk_open_panel()),
+                        pystray.MenuItem("Console", _mk_open_panel(),
+                                         enabled=_is_slot_running),
                         pystray.MenuItem("Web Console",
                                          _mk_web_console_action(idx),
-                                         visible=_mk_web_console_visible(idx)),
-                        pystray.MenuItem("Violations", _mk_open_panel("panel-violations")),
-                        pystray.MenuItem("Metrics", _mk_open_panel("panel-metrics")),
+                                         visible=_mk_web_console_visible(idx),
+                                         enabled=_is_slot_running),
+                        pystray.MenuItem("Violations",
+                                         _mk_open_panel("panel-violations"),
+                                         enabled=_is_slot_running),
+                        pystray.MenuItem("Metrics & Audit",
+                                         _mk_open_panel("panel-metrics"),
+                                         enabled=_is_slot_running),
                         pystray.MenuItem(
                             "Statistics",
                             pystray.Menu(
@@ -1893,7 +1951,7 @@ class DaemonTray:
                                 pystray.Menu.SEPARATOR,
                                 pystray.MenuItem(stats_fns[8], None),
                             ),
-                            visible=_is_slot_running,
+                            enabled=_is_slot_running,
                         ),
                         pystray.Menu.SEPARATOR,
                         pystray.MenuItem(
@@ -1918,7 +1976,8 @@ class DaemonTray:
                                     radio=True,
                                 ),
                             ),
-                            visible=lambda _i, s=idx: _is_slot_running(_i, s) and self._is_mcp_for_slot(s),
+                            visible=lambda _i, s=idx: self._is_mcp_for_slot(s),
+                            enabled=_is_slot_running,
                         ),
                         pystray.Menu.SEPARATOR,
                         pystray.MenuItem(
@@ -1926,7 +1985,6 @@ class DaemonTray:
                             self._mk_change_working_dir(idx),
                         ),
                         pystray.MenuItem("Terminal", _mk_open_shell()),
-                        pystray.MenuItem("Doctor", _mk_doctor()),
                         pystray.Menu.SEPARATOR,
                         *multi_plugin_items,
                         pystray.Menu.SEPARATOR,
@@ -1966,10 +2024,10 @@ class DaemonTray:
                         ),
                         pystray.MenuItem(
                             "Restart daemon", _mk_restart(),
-                            visible=_is_slot_running,
                         ),
                         pystray.Menu.SEPARATOR,
-                        pystray.MenuItem("About", self._on_daemon_about(idx)),
+                        pystray.MenuItem("About", self._on_daemon_about(idx),
+                                         enabled=_is_slot_running),
                     ),
                     visible=make_visible,
                 )
@@ -2057,6 +2115,7 @@ class DaemonTray:
         label=None,
     ):
         """Execute a plugin command with optional target context."""
+        import os
         import shlex
         import subprocess
         from ai_guardian.daemon.multi_client import _launch_in_terminal
@@ -2073,6 +2132,10 @@ class DaemonTray:
                 command_str, {"working_dir": target.working_dir},
             )
 
+        command_str = DaemonTray._resolve_plugin_ai_guardian(
+            command_str, run_on_target, target,
+        )
+
         if _needs_shell(command_str):
             cmd_parts = ["sh", "-c", command_str]
         else:
@@ -2086,6 +2149,15 @@ class DaemonTray:
             cmd_parts = wrap_for_target(
                 cmd_parts, target, interactive=(item_type == "terminal"),
             )
+
+        is_remote = (
+            run_on_target and target
+            and getattr(target, "runtime", "local")
+            in ("container", "kubernetes")
+        )
+        if item_type != "terminal" and not is_remote:
+            shell = os.environ.get("SHELL", "/bin/bash")
+            cmd_parts = [shell, "-lc", command_str]
 
         try:
             if item_type == "terminal":
@@ -2107,10 +2179,14 @@ class DaemonTray:
                     cmd_parts, capture_output=True, text=True, timeout=60,
                 )
                 output = result.stdout.strip()
-                if result.returncode != 0 and result.stderr.strip():
-                    output = result.stderr.strip() if not output else (
-                        output + "\n\n--- stderr ---\n" + result.stderr.strip()
-                    )
+                err = result.stderr.strip()
+                if err:
+                    if result.returncode != 0:
+                        output = err if not output else (
+                            output + "\n\n--- stderr ---\n" + err
+                        )
+                    else:
+                        output = (output + "\n" + err).strip() if output else err
                 from ai_guardian.daemon.tray_plugins import show_dialog
                 show_dialog(label or "AI Guardian", output or "(no output)")
             else:
@@ -2158,8 +2234,10 @@ class DaemonTray:
         if label:
             prompt_cmd += ["--title", label]
 
-        from ai_guardian.tui.tray_prompt import _tkinter_available
-        if _tkinter_available():
+        from ai_guardian.tui.tray_prompt import (
+            _nicegui_available, _tkinter_available,
+        )
+        if _tkinter_available() or _nicegui_available():
             subprocess.Popen(prompt_cmd)
         else:
             from ai_guardian.daemon.multi_client import _launch_in_terminal
@@ -2261,8 +2339,10 @@ class DaemonTray:
         if label:
             prompt_cmd += ["--title", label]
 
-        from ai_guardian.tui.tray_prompt import _tkinter_available
-        if _tkinter_available():
+        from ai_guardian.tui.tray_prompt import (
+            _nicegui_available, _tkinter_available,
+        )
+        if _tkinter_available() or _nicegui_available():
             subprocess.Popen(prompt_cmd)
         else:
             from ai_guardian.daemon.multi_client import _launch_in_terminal
@@ -2521,8 +2601,21 @@ class DaemonTray:
                             )
                 return action
 
+            def _cmd_enabled(_item, ix=i_slot):
+                items_list = get_items_fn()
+                if ix >= len(items_list):
+                    return True
+                item = items_list[ix]
+                if not item.run_on_target:
+                    return True
+                target = get_target_fn()
+                if target is None:
+                    return False
+                return target.status in ("running", "paused")
+
             slots.append(
-                pystray.MenuItem(_cmd_label, _cmd_action(), visible=_cmd_visible)
+                pystray.MenuItem(_cmd_label, _cmd_action(),
+                                 visible=_cmd_visible, enabled=_cmd_enabled)
             )
 
             if depth < self._MAX_SUBMENU_DEPTH:

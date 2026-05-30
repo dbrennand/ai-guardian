@@ -90,6 +90,11 @@ def main():
             action="version",
             version=f"ai-guardian {__version__}",
         )
+        parser.add_argument(
+            "--ide",
+            choices=["claude", "cursor", "copilot", "codex", "windsurf", "gemini", "cline", "zoocode", "augment", "kiro", "junie", "aiderdesk", "openclaw"],
+            help="Specify IDE adapter for hook processing (auto-detected if not provided)"
+        )
 
         # Add subcommands
         subparsers = parser.add_subparsers(dest="command", help="Available commands")
@@ -234,10 +239,10 @@ def main():
             help="Skip confirmation prompt (for non-interactive use)"
         )
 
-        # Metrics subcommand (Issue #469)
+        # Metrics subcommand (Issue #469, #476)
         metrics_parser = subparsers.add_parser(
             "metrics",
-            help="Show violation statistics and trends"
+            help="Show violation statistics, trends, and compliance audit"
         )
         metrics_parser.add_argument(
             "--json",
@@ -250,14 +255,40 @@ def main():
             help="Export filtered violations as CSV"
         )
         metrics_parser.add_argument(
+            "--html",
+            action="store_true",
+            help="Output self-contained HTML audit report"
+        )
+        metrics_parser.add_argument(
             "--since",
             default="30d",
-            help="Time range: Nd for days (e.g. 30d) or ISO date (e.g. 2026-05-01). Default: 30d"
+            help="Time range start: Nd for days (e.g. 30d) or ISO date (e.g. 2026-05-01). Default: 30d"
+        )
+        metrics_parser.add_argument(
+            "--until",
+            default=None,
+            help="Time range end: Nd or ISO date. Default: now"
         )
         metrics_parser.add_argument(
             "--type",
             choices=list(ViolationType),
             help="Filter by violation type"
+        )
+        metrics_parser.add_argument(
+            "--severity",
+            choices=["warning", "high", "critical"],
+            help="Filter by severity level"
+        )
+        metrics_parser.add_argument(
+            "--reset",
+            action="store_true",
+            help="Reset cumulative counters to current log file counts"
+        )
+        metrics_parser.add_argument(
+            "--yes", "-y",
+            action="store_true",
+            dest="metrics_yes",
+            help="Skip confirmation prompt for --reset"
         )
 
         # Console subcommand (primary)
@@ -554,6 +585,10 @@ def main():
             help="File to sanitize (reads stdin if omitted)"
         )
         sanitize_parser.add_argument(
+            "-o", "--output",
+            help="Write output to file instead of stdout (required for image files)"
+        )
+        sanitize_parser.add_argument(
             "--no-secrets",
             action="store_true",
             help="Skip secret redaction"
@@ -577,6 +612,38 @@ def main():
             "--exit-code",
             action="store_true",
             help="Exit with code 1 if redactions were made (for CI/CD)"
+        )
+        sanitize_parser.add_argument(
+            "--output-dir",
+            help="Output directory for sanitized files (required when input is a directory)"
+        )
+        sanitize_parser.add_argument(
+            "--include",
+            action="append",
+            default=None,
+            help="Glob pattern for files to include (repeatable; e.g., --include '*.py')"
+        )
+        sanitize_parser.add_argument(
+            "--exclude",
+            action="append",
+            default=None,
+            help="Glob pattern for files to exclude (repeatable; e.g., --exclude '*.log')"
+        )
+        sanitize_parser.add_argument(
+            "--no-images",
+            action="store_true",
+            help="Skip image OCR processing (copy images as-is)"
+        )
+        sanitize_parser.add_argument(
+            "--redact-strategy",
+            choices=["blur", "blackout", "pixelate"],
+            default="blackout",
+            help="Image redaction method (default: blackout)"
+        )
+        sanitize_parser.add_argument(
+            "--force",
+            action="store_true",
+            help="Allow writing to an existing output directory"
         )
 
         # Doctor subcommand (Issue #475)
@@ -1379,10 +1446,14 @@ def main():
                 traceback.print_exc()
                 return 1
 
-        # If no subcommand, just return (version was handled)
-        return 0
+        # If --ide specified but no subcommand, set env var and fall through to hook mode
+        if not args.command and getattr(args, 'ide', None):
+            os.environ["AI_GUARDIAN_IDE_TYPE"] = args.ide
+        elif not args.command:
+            # No subcommand, no --ide — version was already handled
+            return 0
 
-    # No arguments - run as hook (read from stdin)
+    # No arguments (or --ide only) - run as hook (read from stdin)
     # Load config once and share with both helpers
     _hook_config = None
     try:
@@ -1403,6 +1474,11 @@ def main():
         stdin_content = sys.stdin.read()
         stdin_consumed = True
         hook_data = json.loads(stdin_content)
+
+        # Inject --ide override into hook_data so it survives daemon forwarding
+        _cli_ide = os.environ.get("AI_GUARDIAN_IDE_TYPE")
+        if _cli_ide and "_ide_type" not in hook_data:
+            hook_data["_ide_type"] = _cli_ide
 
         running = is_daemon_running()
         if not running and not _is_stop_requested():

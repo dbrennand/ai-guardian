@@ -304,6 +304,9 @@ class TestMetricsEndpoint:
         mock_report.by_severity = {"high": 3, "warning": 7}
         mock_report.resolved_count = 2
         mock_report.unresolved_count = 8
+        mock_report.cumulative_total = 50
+        mock_report.cumulative_by_type = {"secret_detected": 30, "pii_detected": 20}
+        mock_report.cumulative_since = "2026-01-01T00:00:00Z"
         with mock.patch(
             "ai_guardian.metrics.MetricsComputer.compute",
             return_value=mock_report,
@@ -324,6 +327,9 @@ class TestMetricsEndpoint:
         mock_report.by_severity = {}
         mock_report.resolved_count = 0
         mock_report.unresolved_count = 0
+        mock_report.cumulative_total = 0
+        mock_report.cumulative_by_type = {}
+        mock_report.cumulative_since = ""
         with mock.patch(
             "ai_guardian.metrics.MetricsComputer.__init__",
             return_value=None,
@@ -348,7 +354,9 @@ class TestTrayPluginsEndpoint:
             "items": [{"label": "Hello", "command": "echo hi", "type": "background"}]
         }))
         with mock.patch("ai_guardian.daemon.get_tray_plugins_dir",
-                         return_value=plugins_dir):
+                         return_value=plugins_dir), \
+             mock.patch("ai_guardian.daemon.tray_plugins._load_bundled_plugins",
+                         return_value=[]):
             url = f"http://127.0.0.1:{port}/api/tray-plugins"
             with urlopen(url, timeout=5) as resp:
                 data = json.loads(resp.read())
@@ -359,7 +367,9 @@ class TestTrayPluginsEndpoint:
     def test_get_tray_plugins_returns_empty_when_no_dir(self, rest_api, tmp_path):
         api, port, state = rest_api
         with mock.patch("ai_guardian.daemon.get_tray_plugins_dir",
-                         return_value=tmp_path / "nonexistent"):
+                         return_value=tmp_path / "nonexistent"), \
+             mock.patch("ai_guardian.daemon.tray_plugins._load_bundled_plugins",
+                         return_value=[]):
             url = f"http://127.0.0.1:{port}/api/tray-plugins"
             with urlopen(url, timeout=5) as resp:
                 data = json.loads(resp.read())
@@ -375,7 +385,9 @@ class TestTrayPluginsEndpoint:
                 "items": [{"label": f"Item{i}", "command": f"cmd{i}"}]
             }))
         with mock.patch("ai_guardian.daemon.get_tray_plugins_dir",
-                         return_value=plugins_dir):
+                         return_value=plugins_dir), \
+             mock.patch("ai_guardian.daemon.tray_plugins._load_bundled_plugins",
+                         return_value=[]):
             url = f"http://127.0.0.1:{port}/api/tray-plugins"
             with urlopen(url, timeout=5) as resp:
                 data = json.loads(resp.read())

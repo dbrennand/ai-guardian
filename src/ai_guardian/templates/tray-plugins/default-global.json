@@ -1,0 +1,83 @@
+{
+  "$schema": "https://raw.githubusercontent.com/itdove/ai-guardian/main/src/ai_guardian/schemas/tray-plugin.schema.json",
+  "name": "Quick Actions",
+  "scope": "global",
+  "items": [
+    {
+      "label": "Scan Directory...",
+      "command": "ai-guardian scan {tray.directory}",
+      "type": "terminal",
+      "params": [
+        {
+          "name": "directory",
+          "type": "path-dir",
+          "hint": "Directory path to scan for secrets and security issues",
+          "default": "."
+        }
+      ]
+    },
+    {
+      "label": "Sanitize File...",
+      "command": "ai-guardian sanitize {tray.file} -o {tray.output_file} --redact-strategy {tray.redact_strategy} --summary",
+      "type": "modal",
+      "params": [
+        {
+          "name": "file",
+          "type": "path-file",
+          "hint": "File path to sanitize (text or image)"
+        },
+        {
+          "name": "output_file",
+          "type": "path-file",
+          "hint": "Output file path for sanitized result"
+        },
+        {
+          "name": "redact_strategy",
+          "hint": "Image redaction method",
+          "type": "choice",
+          "options": ["blur", "blackout", "pixelate"],
+          "default": "blur"
+        }
+      ]
+    },
+    {
+      "label": "Sanitize Directory...",
+      "command": "ai-guardian sanitize {tray.directory} --output-dir {tray.output_dir} --redact-strategy {tray.redact_strategy} --summary",
+      "type": "terminal",
+      "params": [
+        {
+          "name": "directory",
+          "type": "path-dir",
+          "hint": "Directory to sanitize recursively",
+          "default": "."
+        },
+        {
+          "name": "output_dir",
+          "type": "path-dir",
+          "hint": "Output directory for sanitized files"
+        },
+        {
+          "name": "redact_strategy",
+          "hint": "Image redaction method",
+          "type": "choice",
+          "options": ["blur", "blackout", "pixelate"],
+          "default": "blur"
+        }
+      ]
+    },
+    {
+      "label": "Check for Updates",
+      "command": "pip index versions ai-guardian",
+      "type": "modal"
+    },
+    {
+      "label": "Open Documentation",
+      "command": {
+        "darwin": "open https://github.com/itdove/ai-guardian#readme",
+        "linux": "xdg-open https://github.com/itdove/ai-guardian#readme",
+        "default": "echo https://github.com/itdove/ai-guardian#readme"
+      },
+      "type": "background"
+    }
+  ]
+}

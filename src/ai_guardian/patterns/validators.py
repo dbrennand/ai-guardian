@@ -94,10 +94,69 @@ def credit_card_check(number_str: str) -> bool:
     return True
 
 
+def aadhaar_check(number_str: str) -> bool:
+    """Validate an Indian Aadhaar number beyond the regex format check.
+
+    Args:
+        number_str: String containing digits with optional spaces/dashes
+
+    Returns:
+        True if the number looks like a plausible Aadhaar number
+    """
+    import re
+    digits = re.sub(r'[- ]', '', number_str)
+    if len(digits) != 12 or not digits.isdigit():
+        return False
+    if digits[0] in ('0', '1'):
+        return False
+    if len(set(digits)) == 1:
+        return False
+    return True
+
+
+def _is_file_path(value: str) -> bool:
+    """Check if a value looks like a filesystem path."""
+    if value.startswith('/') and '/' in value[1:]:
+        return _has_path_like_segments(value.split('/'))
+    if len(value) >= 3 and value[0].isalpha() and value[1] == ':' and value[2] in ('/', '\\'):
+        rest = value[2:].replace('\\', '/')
+        return _has_path_like_segments(rest.split('/'))
+    if value.startswith('./') or value.startswith('../'):
+        return _has_path_like_segments(value.split('/'))
+    return False
+
+
+def _has_path_like_segments(parts: list) -> bool:
+    """Check if split path segments look like directory/file names, not base64."""
+    for p in parts:
+        if p == '' or p in ('.', '..'):
+            continue
+        if not all(c.isalnum() or c in '-_.' for c in p):
+            return False
+    return True
+
+
+def env_not_file_path(matched_text: str) -> bool:
+    """Return False (skip) if the env var value is a filesystem path.
+
+    Extracts the value after '=' and checks for Unix absolute paths,
+    Windows absolute paths, and relative paths starting with ./ or ../
+    """
+    eq_pos = matched_text.find('=')
+    if eq_pos < 0:
+        return True
+    value = matched_text[eq_pos + 1:].strip().strip("'\"")
+    if not value:
+        return True
+    return not _is_file_path(value)
+
+
 VALIDATOR_REGISTRY: dict = {
     "luhn": luhn_check,
     "iban": iban_check,
     "credit_card": credit_card_check,
+    "aadhaar": aadhaar_check,
+    "env_not_file_path": env_not_file_path,
 }
 
 

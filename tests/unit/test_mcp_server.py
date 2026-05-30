@@ -180,6 +180,50 @@ class TestSanitizeText:
         assert "redactions" not in result
 
 
+class TestSanitizeDirectory:
+    """Test sanitize_directory tool."""
+
+    @patch("ai_guardian.sanitizer.sanitize_directory")
+    def test_redact_strategy_passed_through(self, mock_sanitize_dir, tmp_path):
+        """redact_strategy parameter should be forwarded to sanitize_directory."""
+        input_dir = tmp_path / "src"
+        input_dir.mkdir()
+        (input_dir / "test.txt").write_text("hello")
+
+        mock_sanitize_dir.return_value = {
+            "text_files": 1, "image_files": 0, "binary_files": 0,
+            "skipped_files": 0, "total_redactions": {"secrets": 0, "pii": 0, "prompt_injection": 0, "unicode": 0},
+            "total_redaction_count": 0, "file_details": [], "errors": [],
+        }
+
+        server = create_server()
+        tool = server._tool_manager._tools["sanitize_directory"]
+        result = tool.fn(path=str(input_dir), redact_strategy="blackout")
+
+        _, kwargs = mock_sanitize_dir.call_args
+        assert kwargs.get("redact_strategy") == "blackout"
+
+    @patch("ai_guardian.sanitizer.sanitize_directory")
+    def test_invalid_redact_strategy_defaults_to_blackout(self, mock_sanitize_dir, tmp_path):
+        """Invalid redact_strategy should fall back to blackout."""
+        input_dir = tmp_path / "src"
+        input_dir.mkdir()
+        (input_dir / "test.txt").write_text("hello")
+
+        mock_sanitize_dir.return_value = {
+            "text_files": 1, "image_files": 0, "binary_files": 0,
+            "skipped_files": 0, "total_redactions": {"secrets": 0, "pii": 0, "prompt_injection": 0, "unicode": 0},
+            "total_redaction_count": 0, "file_details": [], "errors": [],
+        }
+
+        server = create_server()
+        tool = server._tool_manager._tools["sanitize_directory"]
+        result = tool.fn(path=str(input_dir), redact_strategy="invalid")
+
+        _, kwargs = mock_sanitize_dir.call_args
+        assert kwargs.get("redact_strategy") == "blackout"
+
+
 class TestCheckAnnotations:
     """Test check_annotations tool."""
 
@@ -794,12 +838,12 @@ class TestServerCreation:
         server = create_server()
         assert server is not None
 
-    def test_server_has_16_tools(self):
+    def test_server_has_17_tools(self):
         server = create_server()
         tools = server._tool_manager._tools
         expected = {
             "check_path", "check_command", "check_mcp_trust",
-            "sanitize_text", "check_annotations",
+            "sanitize_text", "sanitize_directory", "check_annotations",
             "get_violations", "get_config", "get_scanner_status",
             "get_scanner_supported", "get_patterns_list",
             "get_metrics", "doctor",
