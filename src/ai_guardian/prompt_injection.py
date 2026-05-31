@@ -30,6 +30,12 @@ from ai_guardian.tool_policy import _strip_bash_heredoc_content
 from ai_guardian.utils.path_matching import match_ignore_pattern
 from ai_guardian.patterns import BUNDLED_FILES, load_bundled_rules
 
+try:
+    from ai_guardian.ast_scanner import extract_scannable_content
+    HAS_AST_SCANNER = True
+except ImportError:
+    HAS_AST_SCANNER = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -1167,13 +1173,7 @@ class PromptInjectionDetector:
         error_msg += (
             f"\nWhy blocked: This pattern matches known {protection_description}\n\n"
             f"This operation has been blocked for security.\n\n"
-            f"DO NOT attempt to bypass this protection - it prevents malicious prompts.\n\n"
-            f"Recommendation:\n"
-            f"- If this is a false positive, add to allowlist in config\n"
-            f"- If discussing prompt injection (not attempting), prefix with \"Example: \"\n"
-            f"- If this occurs when reading files, report as bug (should be context-aware)\n\n"
-            f"Config: ~/.config/ai-guardian/ai-guardian.json\n"
-            f"Section: prompt_injection.allowlist_patterns\n"
+            f"DO NOT attempt to bypass this protection - it prevents malicious prompts.\n"
         )
 
         return error_msg
@@ -1210,6 +1210,14 @@ class PromptInjectionDetector:
             if self._is_file_ignored(file_path):
                 logger.info(f"Skipping prompt injection detection for ignored file: {file_path}")
                 return False, None, False
+
+            # AST-aware scanning: for code files, extract only comments and strings
+            if HAS_AST_SCANNER and source_type == "file_content" and file_path:
+                extracted = extract_scannable_content(content, file_path)
+                if extracted is not None:
+                    content = extracted
+                    if not content.strip():
+                        return False, None, False
 
             # Strip heredoc content before checking for injection patterns
             # This prevents false positives when heredoc content mentions protected keywords
@@ -1259,11 +1267,6 @@ class PromptInjectionDetector:
                         "  • Bidirectional text override (visual deception)\n"
                         "  • Unicode tag characters (hidden data)\n"
                         "  • Homoglyphs (look-alike character substitution)\n\n"
-                        "If this is a false positive, you can:\n"
-                        "  1. Configure unicode_detection in ~/.config/ai-guardian/ai-guardian.json\n"
-                        "  2. Disable specific checks (e.g., 'detect_homoglyphs': false)\n"
-                        "  3. Allow legitimate use cases ('allow_emoji': true, 'allow_rtl_languages': true)\n"
-                        "  4. Temporarily disable: \"unicode_detection\": {\"enabled\": false}\n\n"
                         f"{'='*70}\n"
                     )
                     return True, error_msg, True  # Block, error message, detected

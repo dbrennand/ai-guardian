@@ -215,12 +215,8 @@ class AuditComputer:
     def _count_by_key_as_list(
         violations: List[Dict], key: str, limit: int = 10
     ) -> List[Tuple[str, int]]:
-        counter: Counter = Counter()
-        for v in violations:
-            val = v.get(key)
-            if val:
-                counter[val] += 1
-        return counter.most_common(limit)
+        counts = AuditComputer._count_by_key(violations, key)
+        return sorted(counts.items(), key=lambda x: x[1], reverse=True)[:limit]
 
     @staticmethod
     def _count_by_action(violations: List[Dict]) -> Dict[str, int]:
@@ -306,31 +302,12 @@ class AuditComputer:
     def _load_compliance() -> Dict[str, bool]:
         try:
             from ai_guardian.config_loaders import _load_config_file
-            from ai_guardian.config_utils import is_feature_enabled
+            from ai_guardian.config_utils import get_feature_flags
 
             cfg, _ = _load_config_file()
             if not cfg:
                 cfg = {}
-
-            features: Dict[str, bool] = {}
-            for key in (
-                "secret_scanning",
-                "scan_pii",
-                "prompt_injection",
-                "ssrf_protection",
-                "secret_redaction",
-                "config_file_scanning",
-                "violation_logging",
-                "transcript_scanning",
-                "image_scanning",
-            ):
-                section = cfg.get(key)
-                if isinstance(section, dict):
-                    features[key] = is_feature_enabled(section.get("enabled", True))
-                else:
-                    features[key] = bool(section) if section is not None else True
-            features["permissions"] = cfg.get("permissions", {}).get("enabled", True)
-            return features
+            return get_feature_flags(cfg)
         except Exception:
             return {}
 

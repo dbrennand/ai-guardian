@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Language-aware prompt injection scanning** (Issue #892)
+  - Uses tree-sitter AST parsing to distinguish code from comments/strings
+  - Only comments and string literals are scanned for injection in source files
+  - Code syntax (function definitions, imports, assignments) never triggers detection
+  - Eliminates false positives from patterns like `__init__`, `skip_validation`
+  - Supports Python, JavaScript, TypeScript, Go, Rust, Java, Ruby, C/C++, Bash
+  - Language auto-detected from file extension
+  - Unknown file types fall back to full-text scanning (current behavior)
+  - tree-sitter grammar packages added as core dependencies (Python >= 3.10)
+
+- **Tray auto-starts daemon on user interaction** (Issue #889)
+  - When the user clicks Console, Violations, Terminal, or other tray menu
+    actions, the local daemon is automatically started if it has stopped
+    (idle timeout or crash)
+  - Paused daemons are NOT restarted — the user intentionally paused them
+  - Respects the stop-requested marker from `daemon stop`
+  - 5-second cooldown between auto-start attempts
+  - Works in both single-daemon and multi-daemon tray modes
+
 - **Compliance audit in metrics** (Issue #476)
   - `ai-guardian metrics` extended with `--html`, `--until`, `--severity` flags
   - `--html` outputs self-contained HTML audit report with inline CSS and SVG charts
@@ -24,6 +43,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Tray menu: "Metrics" renamed to "Metrics & Audit"
 
 ### Fixed
+
+- **Remove bypass hints from hook block messages** (Issue #897, #896)
+  - Hook responses no longer include annotation syntax, allowlist instructions,
+    config paths, or false-positive workaround tips
+  - Affected detectors: secret scanning, PII, prompt injection, unicode attack,
+    config file exfiltration
+  - Remediation tips moved to `suggestion` field in violation log entries
+    (violations.jsonl) where they are available to users but not to the AI agent
+  - New UX contract test enforces no-bypass-hints policy across all detectors
+
+- **Browser window stays minimized on KDE/GNOME** (Issue #888)
+  - On Linux, after opening a URL, attempt to raise the browser window via
+    `kdotool` (KDE Wayland), `xdotool` (X11), or `wmctrl` (X11)
+  - Graceful degradation: silently continues if none is installed
+  - Applies to: Web Console, Violations, Metrics & Audit, HTML export,
+    NiceGUI web console startup, and tray-plugin parameter capture
+  - macOS and Windows unaffected
 
 - **Aadhaar PII false positive on UUID all-zeros** (Issue #876)
   - Added `aadhaar_check` post-match validator following the credit card validation pattern
