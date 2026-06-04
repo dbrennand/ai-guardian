@@ -199,6 +199,9 @@ class TestParseSimulationResult:
     def test_ide_options_include_codex(self):
         assert ("Codex", "codex") in IDE_OPTIONS
 
+    def test_ide_options_include_opencode(self):
+        assert ("OpenCode", "opencode") in IDE_OPTIONS
+
 
 class TestSimulationIsolation:
     """Verify that simulations don't write to the real violations log."""

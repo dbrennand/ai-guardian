@@ -5,6 +5,7 @@ Tests for setup command functionality.
 
 import json
 import os
+import sys
 import tempfile
 from pathlib import Path
 from unittest import mock
@@ -15,10 +16,12 @@ from ai_guardian.config_utils import get_config_dir
 from ai_guardian.setup import (
     IDESetup,
     setup_hooks,
+    _create_vbs_wrapper,
     _is_ai_guardian_command,
     _resolve_binary_path,
     _substitute_command,
     _upgrade_ide_flag,
+    _walk_commands,
 )
 
 
@@ -696,6 +699,7 @@ class TestIDESetupParametrized:
 
     # ── setup_ide_hooks new (script-based) ───────────────────────────────
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="Unix script hooks test")
     @pytest.mark.parametrize(
         "ide_name", ["cline", "kiro"], ids=["cline", "kiro"]
     )
@@ -828,6 +832,7 @@ class TestConfigDirEnvironmentVariable:
             config_mgr = ConfigManager()
             assert config_mgr.config_dir == xdg_dir / "ai-guardian"
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="Windows uses APPDATA")
     def test_default_config_dir_when_no_env_vars(self):
         """Test default config directory when no environment variables are set."""
         from ai_guardian.config_manager import ConfigManager
@@ -858,6 +863,7 @@ class TestConfigDirEnvironmentVariable:
             assert '~' not in str(config_mgr.config_dir)
             assert config_mgr.config_dir == Path('~/my-ai-guardian').expanduser()
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="Windows uses APPDATA")
     def test_get_config_dir_utility_function(self, tmp_path):
         """Test the get_config_dir utility function directly."""
         custom_dir = tmp_path / "test-config"
@@ -1138,6 +1144,7 @@ class TestClineSetup:
         assert content.startswith("#!/bin/sh")
         assert "ai-guardian" in content
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="Unix script hooks test")
     def test_setup_ide_hooks_cline_force(self, tmp_path):
         """Test force flag overwrites existing Cline scripts."""
         setup = IDESetup()
@@ -1448,7 +1455,7 @@ class TestInstallScannerMultiple:
                 )
 
                 assert success is True
-                mock_inst.install.assert_called_once_with("gitleaks", ensure_only=True)
+                mock_inst.install.assert_called_once_with("gitleaks", use_pinned=False, ensure_only=True)
                 mock_inst.verify_installation.assert_called_once_with("gitleaks")
 
     def test_install_multiple_scanners(self):
@@ -1471,8 +1478,8 @@ class TestInstallScannerMultiple:
 
                 assert success is True
                 assert mock_inst.install.call_count == 2
-                mock_inst.install.assert_any_call("gitleaks", ensure_only=True)
-                mock_inst.install.assert_any_call("betterleaks", ensure_only=True)
+                mock_inst.install.assert_any_call("gitleaks", use_pinned=False, ensure_only=True)
+                mock_inst.install.assert_any_call("betterleaks", use_pinned=False, ensure_only=True)
 
     def test_install_no_scanner_when_none(self):
         """No scanner installation when install_scanner is None."""
@@ -1573,7 +1580,74 @@ class TestInstallScannerMultiple:
 
                 assert success is True
                 assert mock_inst.install.call_count == 3
-                mock_inst.install.assert_any_call("leaktk", ensure_only=True)
+                mock_inst.install.assert_any_call("leaktk", use_pinned=False, ensure_only=True)
+
+    def test_install_scanner_with_use_pinned(self):
+        """--use-pinned passes use_pinned=True and ensure_only=False to installer."""
+        with mock.patch('ai_guardian.setup.IDESetup') as MockSetup:
+            mock_instance = MockSetup.return_value
+            mock_instance.list_detected_ides.return_value = ['claude']
+            mock_instance.IDE_CONFIGS = {'claude': {'name': 'Claude Code'}}
+            mock_instance.setup_ide_hooks.return_value = (True, 'Success')
+
+            with mock.patch('ai_guardian.scanner_installer.ScannerInstaller') as MockInstaller:
+                mock_inst = MockInstaller.return_value
+                mock_inst.install.return_value = True
+                mock_inst.verify_installation.return_value = True
+
+                success = setup_hooks(
+                    install_scanner=["gitleaks"],
+                    use_pinned=True,
+                    interactive=False
+                )
+
+                assert success is True
+                mock_inst.install.assert_called_once_with(
+                    "gitleaks", use_pinned=True, ensure_only=False
+                )
+
+    def test_install_scanner_without_use_pinned_default(self):
+        """Without --use-pinned, ensure_only=True and use_pinned=False (default)."""
+        with mock.patch('ai_guardian.setup.IDESetup') as MockSetup:
+            mock_instance = MockSetup.return_value
+            mock_instance.list_detected_ides.return_value = ['claude']
+            mock_instance.IDE_CONFIGS = {'claude': {'name': 'Claude Code'}}
+            mock_instance.setup_ide_hooks.return_value = (True, 'Success')
+
+            with mock.patch('ai_guardian.scanner_installer.ScannerInstaller') as MockInstaller:
+                mock_inst = MockInstaller.return_value
+                mock_inst.install.return_value = True
+                mock_inst.verify_installation.return_value = True
+
+                success = setup_hooks(
+                    install_scanner=["gitleaks"],
+                    interactive=False
+                )
+
+                assert success is True
+                mock_inst.install.assert_called_once_with(
+                    "gitleaks", use_pinned=False, ensure_only=True
+                )
+
+    def test_install_scanner_use_pinned_dry_run(self, capsys):
+        """Dry run with --use-pinned prints 'pinned' in output."""
+        with mock.patch('ai_guardian.setup.IDESetup') as MockSetup:
+            mock_instance = MockSetup.return_value
+            mock_instance.list_detected_ides.return_value = ['claude']
+            mock_instance.IDE_CONFIGS = {'claude': {'name': 'Claude Code'}}
+            mock_instance.setup_ide_hooks.return_value = (True, 'Success')
+
+            success = setup_hooks(
+                install_scanner=["gitleaks"],
+                use_pinned=True,
+                dry_run=True,
+                interactive=False
+            )
+
+            assert success is True
+            captured = capsys.readouterr()
+            assert "pinned" in captured.out
+            assert "gitleaks" in captured.out
 
 
 class TestCreateDefaultConfig:
@@ -1662,6 +1736,108 @@ class TestCreateDefaultConfig:
                 config = json.load(f)
             assert 'secret_scanning' in config
             assert 'existing' not in config
+
+    def test_force_strips_deprecated_pattern_server(self, tmp_path):
+        """Issue #914: --force must not preserve deprecated secret_scanning.pattern_server."""
+        from ai_guardian.setup import create_default_config
+
+        config_file = tmp_path / 'ai-guardian.json'
+        old_config = {
+            "secret_scanning": {
+                "enabled": True,
+                "pattern_server": {
+                    "url": "https://example.com",
+                    "patterns_endpoint": "/patterns/gitleaks/8.27.0",
+                },
+                "engines": [{"type": "toml-patterns"}],
+            },
+            "prompt_injection": {"enabled": True},
+        }
+        config_file.write_text(json.dumps(old_config))
+
+        with mock.patch.dict(os.environ, {'AI_GUARDIAN_CONFIG_DIR': str(tmp_path)}):
+            success, message = create_default_config(force=True)
+
+            assert success is True
+            with open(config_file) as f:
+                config = json.load(f)
+            assert "pattern_server" not in config.get("secret_scanning", {})
+            assert "pattern_server" not in config
+
+    def test_force_with_profile_strips_deprecated_pattern_server(self, tmp_path):
+        """Issue #914: --force --profile @standard must produce clean config."""
+        from ai_guardian.setup import create_default_config
+
+        config_file = tmp_path / 'ai-guardian.json'
+        old_config = {
+            "secret_scanning": {
+                "pattern_server": {"url": "https://old.example.com"},
+            },
+        }
+        config_file.write_text(json.dumps(old_config))
+
+        with mock.patch.dict(os.environ, {'AI_GUARDIAN_CONFIG_DIR': str(tmp_path)}):
+            success, message = create_default_config(profile="@standard", force=True)
+
+            assert success is True
+            with open(config_file) as f:
+                config = json.load(f)
+            ss = config.get("secret_scanning", {})
+            assert "pattern_server" not in ss
+            assert "engines" in ss
+
+    def test_force_creates_config_that_passes_doctor(self, tmp_path):
+        """Issue #914: config from --force must pass doctor check_global_pattern_server."""
+        from ai_guardian.setup import create_default_config
+        from ai_guardian.doctor import Doctor, CheckStatus
+
+        config_file = tmp_path / 'ai-guardian.json'
+        old_config = {
+            "secret_scanning": {
+                "pattern_server": {"url": "https://stale.example.com"},
+            },
+        }
+        config_file.write_text(json.dumps(old_config))
+
+        with mock.patch.dict(os.environ, {'AI_GUARDIAN_CONFIG_DIR': str(tmp_path)}):
+            success, _ = create_default_config(force=True)
+            assert success is True
+
+            with open(config_file) as f:
+                config = json.load(f)
+
+            doctor = Doctor(fix=False)
+            doctor._config = config
+            doctor._config_loaded = True
+            result = doctor.check_global_pattern_server()
+            assert result.status == CheckStatus.PASS
+
+    def test_custom_profile_deprecated_key_stripped(self, tmp_path):
+        """Issue #914: even custom profiles with deprecated keys get stripped."""
+        from ai_guardian.setup import create_default_config
+
+        profile_file = tmp_path / "custom.json"
+        profile_config = {
+            "secret_scanning": {
+                "enabled": True,
+                "pattern_server": {"url": "https://custom.example.com"},
+                "engines": [{"type": "toml-patterns"}],
+            },
+            "prompt_injection": {"enabled": True, "sensitivity": "low"},
+        }
+        profile_file.write_text(json.dumps(profile_config))
+
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
+
+        with mock.patch.dict(os.environ, {'AI_GUARDIAN_CONFIG_DIR': str(config_dir)}):
+            success, message = create_default_config(profile=str(profile_file))
+
+            assert success is True
+            config_file = config_dir / 'ai-guardian.json'
+            with open(config_file) as f:
+                config = json.load(f)
+            assert "pattern_server" not in config.get("secret_scanning", {})
 
     def test_create_default_config_dry_run(self, tmp_path):
         """Test dry-run mode for config creation."""
@@ -2032,6 +2208,7 @@ class TestCreateDefaultConfig:
             assert '$schema' in config
             assert 'ai-guardian-config.schema.json' in config['$schema']
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="Windows file:// URI format differs")
     def test_schema_uses_bundled_file_uri(self):
         """Test that $schema uses a file:// URI pointing to the bundled schema."""
         from ai_guardian.setup import _get_default_config_template
@@ -2682,6 +2859,7 @@ class TestMcpDefaultOn:
 class TestResolveBinaryPath:
     """Tests for _resolve_binary_path helper."""
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="Windows prefers pythonw path")
     def test_returns_shutil_which_result(self):
         with mock.patch("ai_guardian.setup.shutil.which", return_value="/usr/local/bin/ai-guardian"):
             assert _resolve_binary_path() == "/usr/local/bin/ai-guardian"
@@ -2732,6 +2910,40 @@ class TestIsAiGuardianCommand:
 
     def test_venv_path_with_ide_flag(self):
         assert _is_ai_guardian_command("/home/user/.venv/bin/ai-guardian --ide gemini") is True
+
+
+class TestWalkCommands:
+    """Tests for _walk_commands generalized tree walker."""
+
+    def test_copy_preserves_original(self):
+        original = {"command": "ai-guardian"}
+        result = _walk_commands(original, lambda v: v == "ai-guardian", lambda _: "/new", copy=True)
+        assert result == {"command": "/new"}
+        assert original == {"command": "ai-guardian"}
+
+    def test_mutate_changes_in_place(self):
+        obj = {"command": "ai-guardian"}
+        _walk_commands(obj, lambda v: v == "ai-guardian", lambda _: "/new", copy=False)
+        assert obj == {"command": "/new"}
+
+    def test_predicate_filters(self):
+        obj = {"command": "other-tool"}
+        result = _walk_commands(obj, lambda v: v == "ai-guardian", lambda _: "/new", copy=True)
+        assert result == {"command": "other-tool"}
+
+    def test_nested_dict_and_list(self):
+        obj = {"hooks": [{"command": "ai-guardian"}, {"command": "other"}]}
+        result = _walk_commands(obj, lambda v: v == "ai-guardian", lambda _: "/new", copy=True)
+        assert result == {"hooks": [{"command": "/new"}, {"command": "other"}]}
+
+    def test_scalar_passthrough(self):
+        assert _walk_commands(42, lambda v: True, lambda _: 0, copy=True) == 42
+        assert _walk_commands("text", lambda v: True, lambda _: "", copy=True) == "text"
+
+    def test_mutate_nested(self):
+        obj = {"hooks": {"pre": [{"command": "ai-guardian"}]}}
+        _walk_commands(obj, lambda v: v == "ai-guardian", lambda v: f"{v} --ide test", copy=False)
+        assert obj["hooks"]["pre"][0]["command"] == "ai-guardian --ide test"
 
 
 class TestSubstituteCommand:
@@ -2844,6 +3056,7 @@ class TestAbsolutePathWritten:
         config = json.loads(config_file.read_text())
         assert config["hooks"]["beforeSubmitPrompt"][0]["command"] == "/mock/bin/ai-guardian --ide cursor"
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="Unix shebang test")
     def test_script_based_hooks_use_absolute_path(self, tmp_path):
         setup = IDESetup()
         hooks_dir = tmp_path / "hooks"
@@ -2893,3 +3106,202 @@ class TestAbsolutePathWritten:
 
         config = json.loads(mcp_file.read_text())
         assert config["mcpServers"]["ai-guardian"]["command"] == "/mock/bin/ai-guardian"
+
+
+class TestWindowsSetup:
+    """Tests for Windows-specific setup behavior (issue #902)."""
+
+    # -- _resolve_binary_path on Windows --
+
+    def test_resolve_binary_path_uses_pythonw_on_windows(self, tmp_path):
+        """On Windows, prefer pythonw.exe -m ai_guardian over bare binary."""
+        fake_pythonw = tmp_path / "pythonw.exe"
+        fake_pythonw.touch()
+        fake_python = tmp_path / "python.exe"
+
+        with mock.patch("ai_guardian.setup.platform.system", return_value="Windows"):
+            with mock.patch("ai_guardian.setup.sys") as mock_sys:
+                mock_sys.executable = str(fake_python)
+                result = _resolve_binary_path()
+
+        assert result == f"{fake_pythonw} -m ai_guardian"
+
+    def test_resolve_binary_path_fallback_when_no_pythonw(self, tmp_path):
+        """On Windows without pythonw.exe, fall back to standard resolution."""
+        fake_python = tmp_path / "python.exe"
+
+        with mock.patch("ai_guardian.setup.platform.system", return_value="Windows"):
+            with mock.patch("ai_guardian.setup.shutil.which", return_value="C:\\bin\\ai-guardian.exe"):
+                with mock.patch("ai_guardian.setup.sys") as mock_sys:
+                    mock_sys.executable = str(fake_python)
+                    result = _resolve_binary_path()
+
+        assert result == "C:\\bin\\ai-guardian.exe"
+
+    def test_resolve_binary_path_unchanged_on_macos(self):
+        """macOS behavior is unchanged."""
+        with mock.patch("ai_guardian.setup.platform.system", return_value="Darwin"):
+            with mock.patch("ai_guardian.setup.shutil.which", return_value="/usr/local/bin/ai-guardian"):
+                assert _resolve_binary_path() == "/usr/local/bin/ai-guardian"
+
+    def test_resolve_binary_path_unchanged_on_linux(self):
+        """Linux behavior is unchanged."""
+        with mock.patch("ai_guardian.setup.platform.system", return_value="Linux"):
+            with mock.patch("ai_guardian.setup.shutil.which", return_value="/usr/bin/ai-guardian"):
+                assert _resolve_binary_path() == "/usr/bin/ai-guardian"
+
+    # -- _is_ai_guardian_command with Windows paths --
+
+    def test_windows_backslash_path(self):
+        assert _is_ai_guardian_command("C:\\Python312\\Scripts\\ai-guardian") is True
+
+    def test_windows_exe_suffix(self):
+        assert _is_ai_guardian_command("C:\\Python312\\Scripts\\ai-guardian.exe") is True
+
+    def test_windows_backslash_with_ide_flag(self):
+        assert _is_ai_guardian_command("C:\\Python312\\Scripts\\ai-guardian --ide claude") is True
+
+    def test_pythonw_module_invocation(self):
+        assert _is_ai_guardian_command("C:\\Python312\\pythonw.exe -m ai_guardian --ide claude") is True
+
+    def test_pythonw_module_bare(self):
+        assert _is_ai_guardian_command("pythonw.exe -m ai_guardian") is True
+
+    # -- _substitute_command with Windows values --
+
+    def test_substitute_replaces_exe_variant(self):
+        result = _substitute_command(
+            {"command": "ai-guardian.exe"}, "C:\\Python312\\pythonw.exe -m ai_guardian"
+        )
+        assert result == {"command": "C:\\Python312\\pythonw.exe -m ai_guardian"}
+
+    def test_substitute_exe_with_ide_type(self):
+        result = _substitute_command(
+            {"command": "ai-guardian.exe"},
+            "C:\\Python312\\pythonw.exe -m ai_guardian",
+            ide_type="cursor",
+        )
+        assert result == {"command": "C:\\Python312\\pythonw.exe -m ai_guardian --ide cursor"}
+
+    # -- VBS wrapper --
+
+    def test_vbs_wrapper_created_on_windows(self, tmp_path):
+        with mock.patch("ai_guardian.setup.platform.system", return_value="Windows"):
+            vbs_path = _create_vbs_wrapper(
+                "C:\\Python312\\pythonw.exe -m ai_guardian --ide claude", tmp_path
+            )
+
+        assert vbs_path is not None
+        assert vbs_path.exists()
+        content = vbs_path.read_text()
+        assert 'WScript.Shell' in content
+        assert 'pythonw.exe -m ai_guardian --ide claude' in content
+        assert ', 0, True' in content
+
+    def test_vbs_wrapper_not_created_on_macos(self, tmp_path):
+        with mock.patch("ai_guardian.setup.platform.system", return_value="Darwin"):
+            result = _create_vbs_wrapper("ai-guardian", tmp_path)
+
+        assert result is None
+
+    def test_vbs_wrapper_not_created_on_linux(self, tmp_path):
+        with mock.patch("ai_guardian.setup.platform.system", return_value="Linux"):
+            result = _create_vbs_wrapper("ai-guardian", tmp_path)
+
+        assert result is None
+
+    # -- _upgrade_ide_flag with Windows paths --
+
+    def test_upgrade_ide_flag_windows_exe_path(self):
+        config = {"command": "C:\\Python312\\Scripts\\ai-guardian.exe"}
+        _upgrade_ide_flag(config, "claude")
+        assert config["command"] == "C:\\Python312\\Scripts\\ai-guardian.exe --ide claude"
+
+    def test_upgrade_ide_flag_pythonw_command(self):
+        config = {"command": "C:\\Python312\\pythonw.exe -m ai_guardian"}
+        _upgrade_ide_flag(config, "cursor")
+        assert config["command"] == "C:\\Python312\\pythonw.exe -m ai_guardian --ide cursor"
+
+    # -- End-to-end: setup_ide_hooks uses pythonw on Windows --
+
+    @pytest.mark.parametrize("ide_type", ["claude", "cursor", "copilot", "codex", "windsurf", "gemini", "augment"])
+    def test_hooks_use_pythonw_on_windows(self, tmp_path, ide_type):
+        """All agent adapters use pythonw.exe on Windows."""
+        setup = IDESetup()
+        config_file = tmp_path / "settings.json"
+
+        with mock.patch.object(
+            setup, "IDE_CONFIGS",
+            {ide_type: {**IDESetup.IDE_CONFIGS[ide_type], "config_path": str(config_file)}},
+        ):
+            with mock.patch(
+                "ai_guardian.setup._resolve_binary_path",
+                return_value="C:\\Python312\\pythonw.exe -m ai_guardian",
+            ):
+                with mock.patch("ai_guardian.setup.platform.system", return_value="Windows"):
+                    with mock.patch.object(setup, "verify_gitleaks_installed", return_value=(True, "ok")):
+                        success, msg = setup.setup_ide_hooks(ide_type)
+
+        assert success, msg
+        config = json.loads(config_file.read_text())
+        config_str = json.dumps(config)
+        assert "pythonw.exe -m ai_guardian" in config_str
+
+    # -- Script-based hooks generate .bat on Windows --
+
+    @pytest.mark.parametrize("ide_type", ["cline", "zoocode", "kiro"])
+    def test_script_hooks_create_bat_on_windows(self, tmp_path, ide_type):
+        """Script-based IDEs create .bat files on Windows."""
+        setup = IDESetup()
+        hooks_dir = tmp_path / "hooks"
+
+        with mock.patch.object(
+            setup, "IDE_CONFIGS",
+            {ide_type: {**IDESetup.IDE_CONFIGS[ide_type], "config_path": str(hooks_dir)}},
+        ):
+            with mock.patch("ai_guardian.setup._resolve_binary_path", return_value=r"C:\Python312\pythonw.exe -m ai_guardian"):
+                with mock.patch("ai_guardian.setup.platform.system", return_value="Windows"):
+                    with mock.patch.object(setup, "verify_gitleaks_installed", return_value=(True, "ok")):
+                        success, msg = setup.setup_ide_hooks(ide_type, dry_run=False, force=False)
+
+        assert success, msg
+        for script_name in IDESetup.IDE_CONFIGS[ide_type]["hook_scripts"]:
+            bat_path = hooks_dir / f"{script_name}.bat"
+            assert bat_path.exists(), f"{bat_path} not created"
+            content = bat_path.read_text()
+            assert content.startswith("@echo off")
+            assert "ai_guardian" in content
+
+    def test_script_hooks_no_bat_on_unix(self, tmp_path):
+        """Script-based IDEs create shebang scripts on Unix."""
+        setup = IDESetup()
+        hooks_dir = tmp_path / "hooks"
+
+        with mock.patch.object(
+            setup, "IDE_CONFIGS",
+            {"cline": {**IDESetup.IDE_CONFIGS["cline"], "config_path": str(hooks_dir)}},
+        ):
+            with mock.patch("ai_guardian.setup._resolve_binary_path", return_value="/mock/bin/ai-guardian"):
+                with mock.patch("ai_guardian.setup.platform.system", return_value="Linux"):
+                    with mock.patch.object(setup, "verify_gitleaks_installed", return_value=(True, "ok")):
+                        success, _ = setup.setup_ide_hooks("cline", dry_run=False, force=False)
+
+        assert success
+        script = (hooks_dir / "PreToolUse").read_text()
+        assert script.startswith("#!/bin/sh")
+
+    def test_is_already_configured_detects_bat(self, tmp_path):
+        """check_hooks_configured finds .bat hooks on Windows."""
+        setup = IDESetup()
+        hooks_dir = tmp_path / "hooks"
+        hooks_dir.mkdir()
+        (hooks_dir / "PreToolUse.bat").write_text("@echo off\r\nai-guardian --ide cline\r\n")
+
+        with mock.patch.object(
+            setup, "IDE_CONFIGS",
+            {"cline": {**IDESetup.IDE_CONFIGS["cline"], "config_path": str(hooks_dir)}},
+        ):
+            with mock.patch("ai_guardian.setup.platform.system", return_value="Windows"):
+                result = setup.check_hooks_configured(hooks_dir, "cline")
+
+        assert result is True

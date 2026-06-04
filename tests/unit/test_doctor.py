@@ -7,6 +7,7 @@ Tests health check: config validation, scanner detection, hook verification, etc
 import argparse
 import json
 import os
+import sys
 import time
 from pathlib import Path
 from unittest import mock
@@ -94,6 +95,54 @@ class TestDoctorReport:
 
 
 # --- Individual check tests ---
+
+
+class TestCheckPythonVersion:
+    def test_pass_310_plus(self, _isolate_config_dir):
+        with mock.patch("ai_guardian.doctor.sys") as mock_sys:
+            mock_sys.version_info = (3, 12, 1, "final", 0)
+            doctor = Doctor()
+            result = doctor.check_python_version()
+        assert result.status == CheckStatus.PASS
+        assert "3.12.1" in result.message
+
+    def test_warn_39(self, _isolate_config_dir):
+        with mock.patch("ai_guardian.doctor.sys") as mock_sys:
+            mock_sys.version_info = (3, 9, 18, "final", 0)
+            doctor = Doctor()
+            result = doctor.check_python_version()
+        assert result.status == CheckStatus.WARN
+        assert "3.9.18" in result.message
+        assert "AST-aware scanning disabled" in result.message
+        assert result.fix_hint is not None
+        assert "3.10+" in result.fix_hint
+
+    def test_fail_38(self, _isolate_config_dir):
+        with mock.patch("ai_guardian.doctor.sys") as mock_sys:
+            mock_sys.version_info = (3, 8, 16, "final", 0)
+            doctor = Doctor()
+            result = doctor.check_python_version()
+        assert result.status == CheckStatus.FAIL
+        assert "3.8.16" in result.message
+        assert "unsupported" in result.message
+        assert result.fix_hint is not None
+        assert "3.9+" in result.fix_hint
+
+    def test_fail_27(self, _isolate_config_dir):
+        with mock.patch("ai_guardian.doctor.sys") as mock_sys:
+            mock_sys.version_info = (2, 7, 18, "final", 0)
+            doctor = Doctor()
+            result = doctor.check_python_version()
+        assert result.status == CheckStatus.FAIL
+        assert "2.7.18" in result.message
+
+    def test_pass_310_exact(self, _isolate_config_dir):
+        with mock.patch("ai_guardian.doctor.sys") as mock_sys:
+            mock_sys.version_info = (3, 10, 0, "final", 0)
+            doctor = Doctor()
+            result = doctor.check_python_version()
+        assert result.status == CheckStatus.PASS
+        assert "3.10.0" in result.message
 
 
 class TestCheckConfigFile:
@@ -658,6 +707,7 @@ class TestCheckPsCachePath:
         assert result.status == CheckStatus.PASS
         assert "writable" in result.message
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="chmod 0o444 not effective on Windows")
     def test_not_writable(self, _isolate_config_dir, tmp_path):
         self._write_ps_config(_isolate_config_dir)
         ro_dir = tmp_path / "readonly_cache"
@@ -871,6 +921,8 @@ class TestCheckPsCacheFreshness:
         result = doctor.check_ps_cache_freshness()
         assert result.status == CheckStatus.WARN
         assert "stale" in result.message.lower()
+        assert result.fixable is True
+        assert result.fixed is False
 
     def test_expired_cache(self, _isolate_config_dir):
         cache_dir = Path(os.environ["AI_GUARDIAN_CACHE_DIR"])
@@ -883,6 +935,8 @@ class TestCheckPsCacheFreshness:
         result = doctor.check_ps_cache_freshness()
         assert result.status == CheckStatus.FAIL
         assert "expired" in result.message.lower()
+        assert result.fixable is True
+        assert result.fixed is False
 
     def test_no_cache_file(self, _isolate_config_dir):
         self._write_ps_config(_isolate_config_dir)
@@ -890,6 +944,8 @@ class TestCheckPsCacheFreshness:
         result = doctor.check_ps_cache_freshness()
         assert result.status == CheckStatus.WARN
         assert "No cached patterns" in result.message
+        assert result.fixable is True
+        assert result.fixed is False
 
     def test_custom_cache_path(self, _isolate_config_dir, tmp_path):
         cache_file = tmp_path / "custom" / "my-patterns.toml"
@@ -900,6 +956,73 @@ class TestCheckPsCacheFreshness:
         result = doctor.check_ps_cache_freshness()
         assert result.status == CheckStatus.PASS
         assert "2 rules" in result.message
+
+    def test_fix_stale_cache(self, _isolate_config_dir):
+        cache_dir = Path(os.environ["AI_GUARDIAN_CACHE_DIR"])
+        cache_file = cache_dir / "patterns.toml"
+        cache_file.write_text('[[rules]]\nid = "test"\n')
+        old_time = time.time() - (2 * 86400)
+        os.utime(cache_file, (old_time, old_time))
+        self._write_ps_config(_isolate_config_dir)
+        with mock.patch("ai_guardian.doctor.Doctor._refresh_ps_cache", return_value=(True, None)):
+            doctor = Doctor(fix=True)
+            result = doctor.check_ps_cache_freshness()
+        assert result.status == CheckStatus.PASS
+        assert result.fixable is True
+        assert result.fixed is True
+
+    def test_fix_expired_cache(self, _isolate_config_dir):
+        cache_dir = Path(os.environ["AI_GUARDIAN_CACHE_DIR"])
+        cache_file = cache_dir / "patterns.toml"
+        cache_file.write_text('[[rules]]\nid = "test"\n')
+        old_time = time.time() - (10 * 86400)
+        os.utime(cache_file, (old_time, old_time))
+        self._write_ps_config(_isolate_config_dir)
+        with mock.patch("ai_guardian.doctor.Doctor._refresh_ps_cache", return_value=(True, None)):
+            doctor = Doctor(fix=True)
+            result = doctor.check_ps_cache_freshness()
+        assert result.status == CheckStatus.PASS
+        assert result.fixable is True
+        assert result.fixed is True
+
+    def test_fix_no_cache_file(self, _isolate_config_dir):
+        self._write_ps_config(_isolate_config_dir)
+        with mock.patch("ai_guardian.doctor.Doctor._refresh_ps_cache", return_value=(True, None)):
+            doctor = Doctor(fix=True)
+            result = doctor.check_ps_cache_freshness()
+        assert result.status == CheckStatus.PASS
+        assert result.fixable is True
+        assert result.fixed is True
+
+    def test_fix_refresh_failure(self, _isolate_config_dir):
+        cache_dir = Path(os.environ["AI_GUARDIAN_CACHE_DIR"])
+        cache_file = cache_dir / "patterns.toml"
+        cache_file.write_text('[[rules]]\nid = "test"\n')
+        old_time = time.time() - (2 * 86400)
+        os.utime(cache_file, (old_time, old_time))
+        self._write_ps_config(_isolate_config_dir)
+        with mock.patch("ai_guardian.doctor.Doctor._refresh_ps_cache", return_value=(False, "Connection refused")):
+            doctor = Doctor(fix=True)
+            result = doctor.check_ps_cache_freshness()
+        assert result.status == CheckStatus.WARN
+        assert result.fixable is True
+        assert result.fixed is False
+        assert "Connection refused" in result.fix_hint
+
+    def test_fix_expired_refresh_failure(self, _isolate_config_dir):
+        cache_dir = Path(os.environ["AI_GUARDIAN_CACHE_DIR"])
+        cache_file = cache_dir / "patterns.toml"
+        cache_file.write_text('[[rules]]\nid = "test"\n')
+        old_time = time.time() - (10 * 86400)
+        os.utime(cache_file, (old_time, old_time))
+        self._write_ps_config(_isolate_config_dir)
+        with mock.patch("ai_guardian.doctor.Doctor._refresh_ps_cache", return_value=(False, "Timeout")):
+            doctor = Doctor(fix=True)
+            result = doctor.check_ps_cache_freshness()
+        assert result.status == CheckStatus.FAIL
+        assert result.fixable is True
+        assert result.fixed is False
+        assert "Timeout" in result.fix_hint
 
 
 # --- Output formatter tests ---
@@ -1047,7 +1170,7 @@ class TestDoctorRunAll:
         doctor = Doctor()
         report = doctor.run_all()
         assert isinstance(report, DoctorReport)
-        assert len(report.checks) == 23
+        assert len(report.checks) == 24
         assert report.version != ""
 
     def test_check_crash_handled(self, _isolate_config_dir):

@@ -19,6 +19,7 @@ from ai_guardian.hook_adapters.kiro import KiroAdapter
 from ai_guardian.hook_adapters.augment import AugmentAdapter
 from ai_guardian.hook_adapters.codex import CodexAdapter
 from ai_guardian.hook_adapters.claude_code import ClaudeCodeAdapter
+from ai_guardian.hook_adapters.opencode import OpenCodeAdapter
 from ai_guardian.hook_adapters.junie import JunieAdapter
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,7 @@ ADAPTER_CLASSES = [
     KiroAdapter,         # kiro_hook_type or kiro_version
     AugmentAdapter,      # is_mcp_tool + tool_name
     CodexAdapter,        # PermissionRequest / Codex-specific fields
+    OpenCodeAdapter,     # opencode_version or hook_source
     ClaudeCodeAdapter,   # PascalCase hook_event_name (fallback)
 ]
 
@@ -128,6 +130,7 @@ __all__ = [
     "ClineAdapter",
     "KiroAdapter",
     "AugmentAdapter",
+    "OpenCodeAdapter",
     "JunieAdapter",
     "ADAPTER_CLASSES",
 ]

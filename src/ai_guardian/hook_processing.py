@@ -13,6 +13,35 @@ except ImportError:
     _HAS_FCNTL = False
 import fnmatch
 import glob
+
+
+def _fnmatch_path(path, pattern):
+    """fnmatch with normalized separators for cross-platform path matching."""
+    return fnmatch.fnmatch(path.replace("\\", "/"), pattern.replace("\\", "/"))
+
+
+def _startswith_path(path, prefix):
+    """startswith with normalized separators for cross-platform path matching."""
+    return path.replace("\\", "/").startswith(prefix.replace("\\", "/"))
+
+
+def _resolve_pattern_path(pattern):
+    """Resolve a glob pattern path: realpath for the concrete prefix, normpath for wildcard suffix."""
+    expanded = os.path.expanduser(pattern)
+    star_idx = expanded.find("*")
+    if star_idx == -1:
+        return os.path.realpath(expanded)
+    prefix = expanded[:star_idx]
+    suffix = expanded[star_idx:]
+    last_sep = max(prefix.rfind("/"), prefix.rfind("\\"))
+    if last_sep >= 0:
+        dir_prefix = prefix[:last_sep]
+        remainder = prefix[last_sep:] + suffix
+    else:
+        dir_prefix = ""
+        remainder = expanded
+    resolved_prefix = os.path.realpath(dir_prefix) if dir_prefix else ""
+    return os.path.normpath(resolved_prefix + remainder)
 import hashlib
 import json
 import logging
@@ -111,6 +140,12 @@ try:
 except ImportError:
     HAS_IMAGE_SCANNER = False
 
+try:
+    from ai_guardian.ast_scanner import extract_scannable_content
+    HAS_AST_SCANNER = True
+except ImportError:
+    HAS_AST_SCANNER = False
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_ENGINES = ["toml-patterns", "gitleaks"]
@@ -189,14 +224,14 @@ def _is_path_excluded(file_path, config):
 
             try:
                 # Expand tilde and convert to absolute path, resolving symlinks
-                expanded_path = os.path.realpath(os.path.expanduser(exclusion_path))
+                expanded_path = _resolve_pattern_path(exclusion_path)
 
                 # Check for wildcards
                 if "**" in expanded_path:
                     # Recursive wildcard: match directory and all subdirectories
                     # Remove /** or ** from end for directory comparison
-                    base_path = expanded_path.replace("/**", "").replace("**", "")
-                    if abs_file_path.startswith(base_path):
+                    base_path = expanded_path.replace("\\**", "").replace("/**", "").replace("**", "")
+                    if _startswith_path(abs_file_path, base_path):
                         logging.debug(f"Path {abs_file_path} matches recursive exclusion: {exclusion_path}")
                         return True
                 elif "*" in expanded_path:
@@ -205,13 +240,13 @@ def _is_path_excluded(file_path, config):
                     wildcard_parent = os.path.dirname(expanded_path)
 
                     # Check if file's parent matches the wildcard pattern
-                    if fnmatch.fnmatch(file_parent, expanded_path) or file_parent.startswith(expanded_path.replace("/*", "")):
+                    if _fnmatch_path(file_parent, expanded_path) or _startswith_path(file_parent, expanded_path.replace("\\*", "").replace("/*", "")):
                         logging.debug(f"Path {abs_file_path} matches wildcard exclusion: {exclusion_path}")
                         return True
                 else:
                     # Exact path match: check if file is within excluded directory
                     # Add trailing slash to ensure directory boundary matching
-                    if abs_file_path.startswith(expanded_path + os.sep) or abs_file_path == expanded_path:
+                    if _startswith_path(abs_file_path, expanded_path + "/") or abs_file_path == expanded_path:
                         logging.debug(f"Path {abs_file_path} matches exact exclusion: {exclusion_path}")
                         return True
 
@@ -325,12 +360,12 @@ def _check_directory_rules(file_path, config):
                     else:
                         # For non-leading-** patterns, use the original implementation
                         # This handles absolute paths, tilde expansion, and wildcards correctly
-                        expanded_pattern = os.path.realpath(os.path.expanduser(pattern))
+                        expanded_pattern = _resolve_pattern_path(pattern)
 
                         # Check for wildcards
                         if "**" in expanded_pattern:
                             # Recursive wildcard: match directory and all subdirectories
-                            base_path = expanded_pattern.replace("/**", "").replace("**", "")
+                            base_path = expanded_pattern.replace("\\**", "").replace("/**", "").replace("**", "")
 
                             # Check if base_path still contains wildcards (e.g., daf-*/**, ~/projects/*/src/**)
                             if "*" in base_path:
@@ -345,7 +380,7 @@ def _check_directory_rules(file_path, config):
 
                                 while current_path and current_path != os.path.dirname(current_path):
                                     # Check if this directory matches the base pattern
-                                    if fnmatch.fnmatch(current_path, base_path):
+                                    if _fnmatch_path(current_path, base_path):
                                         # Found a matching directory - the file is under it
                                         matched = True
                                         break
@@ -359,7 +394,7 @@ def _check_directory_rules(file_path, config):
                                     break
                             else:
                                 # No wildcards in base_path, use simple startswith
-                                if abs_file_path.startswith(base_path):
+                                if _startswith_path(abs_file_path, base_path):
                                     final_decision = mode
                                     matched_pattern = pattern
                                     logging.debug(f"Path {abs_file_path} matched rule: {mode} {pattern} (action={global_action})")
@@ -367,7 +402,7 @@ def _check_directory_rules(file_path, config):
                         elif "*" in expanded_pattern:
                             # Single-level wildcard: use fnmatch
                             file_parent = os.path.dirname(abs_file_path)
-                            if fnmatch.fnmatch(file_parent, expanded_pattern) or file_parent.startswith(expanded_pattern.replace("/*", "")):
+                            if _fnmatch_path(file_parent, expanded_pattern) or _startswith_path(file_parent, expanded_pattern.replace("\\*", "").replace("/*", "")):
                                 final_decision = mode
                                 matched_pattern = pattern
                                 logging.debug(f"Path {abs_file_path} matched rule: {mode} {pattern} (action={global_action})")
@@ -824,7 +859,8 @@ def _save_transcript_positions(positions: Dict[str, int]) -> None:
     state_dir.mkdir(parents=True, exist_ok=True)
     pos_file = state_dir / "transcript_positions.json"
     try:
-        pruned = {k: v for k, v in positions.items() if os.path.exists(k)}
+        pruned = {k: v for k, v in positions.items()
+                  if k.startswith("opencode:") or os.path.exists(k)}
         with open(pos_file, 'w', encoding='utf-8') as f:
             json.dump(pruned, f)
     except Exception as e:
@@ -930,7 +966,8 @@ def _save_seen_findings(seen: Dict[str, Dict[str, str]]) -> None:
     state_dir.mkdir(parents=True, exist_ok=True)
     sf_file = state_dir / "transcript_seen_findings.json"
     try:
-        pruned = {k: v for k, v in seen.items() if os.path.exists(k)}
+        pruned = {k: v for k, v in seen.items()
+                  if k.startswith("opencode:") or os.path.exists(k)}
         with open(sf_file, 'w', encoding='utf-8') as f:
             json.dump(pruned, f)
     except Exception as e:
@@ -1108,9 +1145,42 @@ def scan_transcript_incremental(
         _save_transcript_positions(positions)
         return warnings
 
-    # Load seen findings to deduplicate across scans (breaks self-referential loop)
+    warnings = _scan_transcript_text(
+        combined_text, transcript_path, secret_config, pii_config, hook_context
+    )
+
+    # Update position to actual bytes read
+    positions[transcript_path] = new_pos
+    _save_transcript_positions(positions)
+
+    return warnings
+
+
+def _scan_transcript_text(
+    combined_text: str,
+    transcript_key: str,
+    secret_config: Optional[Dict] = None,
+    pii_config: Optional[Dict] = None,
+    hook_context: Optional[Dict] = None,
+) -> list:
+    """Scan combined text for secrets and PII with deduplication.
+
+    Shared by both JSONL and SQLite transcript scanning paths.
+
+    Args:
+        combined_text: Concatenated transcript text to scan.
+        transcript_key: Key for dedup tracking (file path or ``opencode:<session_id>``).
+        secret_config: Secret scanning config.
+        pii_config: PII scanning config.
+        hook_context: Optional context with session_id for correlation.
+
+    Returns:
+        List of warning message strings.
+    """
+    warnings = []
+
     seen_all = _load_seen_findings()
-    seen = seen_all.get(transcript_path, {})
+    seen = seen_all.get(transcript_key, {})
     now_iso = datetime.now(timezone.utc).isoformat()
 
     # --- Secret scanning ---
@@ -1144,7 +1214,7 @@ def scan_transcript_incremental(
                     )
                     warnings.append(warning_msg)
                     _log_transcript_violation(
-                        ViolationType.SECRET_IN_TRANSCRIPT, transcript_path,
+                        ViolationType.SECRET_IN_TRANSCRIPT, transcript_key,
                         details={"reason": secret_error},
                         hook_context=hook_context
                     )
@@ -1188,20 +1258,74 @@ def scan_transcript_incremental(
                     )
                     warnings.append(warning_msg)
                     _log_transcript_violation(
-                        ViolationType.PII_IN_TRANSCRIPT, transcript_path,
+                        ViolationType.PII_IN_TRANSCRIPT, transcript_key,
                         details={"pii_types": pii_types, "pii_count": len(new_redactions)},
                         hook_context=hook_context
                     )
         except Exception as e:
             logging.debug(f"Transcript PII scan error (fail-open): {e}")
 
-    # Update position to actual bytes read
-    positions[transcript_path] = new_pos
-    _save_transcript_positions(positions)
-
     # Persist seen findings
-    seen_all[transcript_path] = seen
+    seen_all[transcript_key] = seen
     _save_seen_findings(seen_all)
+
+    return warnings
+
+
+def scan_opencode_transcript_incremental(
+    db_path: str,
+    session_id: str,
+    secret_config: Optional[Dict] = None,
+    pii_config: Optional[Dict] = None,
+    hook_context: Optional[Dict] = None,
+) -> list:
+    """Incrementally scan OpenCode session transcript via SQLite.
+
+    Reads new message parts since the last recorded timestamp from
+    OpenCode's SQLite database. Uses the same scanning logic as the
+    JSONL transcript scanner.
+
+    Args:
+        db_path: Absolute path to opencode.db.
+        session_id: OpenCode session ID.
+        secret_config: Secret scanning config.
+        pii_config: PII scanning config.
+        hook_context: Optional context with session_id for correlation.
+
+    Returns:
+        List of warning message strings (empty if nothing found).
+    """
+    from ai_guardian.opencode_transcript import (
+        get_opencode_latest_timestamp,
+        read_opencode_transcript,
+    )
+
+    warnings = []
+    pos_key = f"opencode:{session_id}"
+
+    positions = _load_transcript_positions()
+
+    if pos_key not in positions:
+        # First scan: skip to current end (same as JSONL behaviour).
+        latest_ts = get_opencode_latest_timestamp(db_path, session_id)
+        positions[pos_key] = latest_ts
+        _save_transcript_positions(positions)
+        logging.debug(f"OpenCode transcript first seen, initialized position to {latest_ts}")
+        return warnings
+
+    last_ts = positions[pos_key]
+    combined_text, new_ts = read_opencode_transcript(db_path, session_id, last_ts)
+
+    if not combined_text:
+        return warnings
+
+    warnings = _scan_transcript_text(
+        combined_text, pos_key, secret_config, pii_config, hook_context
+    )
+
+    # Advance cursor
+    positions[pos_key] = new_ts
+    _save_transcript_positions(positions)
 
     return warnings
 
@@ -1870,7 +1994,7 @@ def check_secrets_with_gitleaks(content, filename="temp_file", context: Optional
                 else:
                     # For non-leading-** patterns, use Path.match()
                     file_path_obj = Path(abs_file_path)
-                    expanded_pattern = str(Path(pattern).expanduser())
+                    expanded_pattern = os.path.expanduser(pattern)
                     matched = file_path_obj.match(expanded_pattern)
 
                 if matched:
@@ -1898,6 +2022,14 @@ def check_secrets_with_gitleaks(content, filename="temp_file", context: Optional
             if _gitleaks_allowlist and file_path:
                 if _gitleaks_cfg.should_skip_file(file_path, _gitleaks_allowlist):
                     logging.info(f"Skipping secret scanning for .gitleaks.toml allowlisted path: {file_path}")
+                    return False, None
+
+        # AST-aware scanning: for code files, extract only comments and strings
+        if HAS_AST_SCANNER and file_path:
+            extracted = extract_scannable_content(content, file_path)
+            if extracted is not None:
+                content = extracted
+                if not content.strip():
                     return False, None
 
         # Use in-memory filesystem on Linux for better performance
@@ -3790,6 +3922,61 @@ def process_hook_data(hook_data, daemon_state=None):
                                           error_message=f"Transcript scanning failed (blocked by on_scan_error=block): {e}",
                                           violation_type=ViolationType.SECRET_DETECTED, security_message=security_message)
                 logging.warning(f"Transcript scanning error (fail-open): {e}")
+
+        # OpenCode transcript scanning via SQLite (Issue #934)
+        # When no transcript_path is available and adapter is OpenCode,
+        # read conversation text from OpenCode's SQLite session DB.
+        if not transcript_path and hook_event == HookEvent.PROMPT and adapter and adapter.name == "OpenCode":
+            try:
+                from ai_guardian.opencode_transcript import get_opencode_db_path
+
+                ts_config, ts_error = _load_transcript_scanning_config()
+                if ts_error:
+                    logging.warning(f"Transcript scanning config error: {ts_error}")
+
+                if ts_config and is_feature_enabled(
+                    ts_config.get("enabled"),
+                    now,
+                    default=True
+                ):
+                    oc_db_path = get_opencode_db_path()
+                    oc_session_id = hook_data.get("session_id")
+                    if oc_db_path and oc_session_id:
+                        logging.info("Scanning OpenCode transcript (SQLite) for secrets/PII...")
+
+                        try:
+                            ts_secret_config = secret_config
+                        except NameError:
+                            ts_secret_config, _ = _load_secret_scanning_config()
+                        try:
+                            ts_pii_config = pii_config
+                        except NameError:
+                            ts_pii_config, _ = _load_pii_config()
+
+                        transcript_warnings = scan_opencode_transcript_incremental(
+                            oc_db_path,
+                            oc_session_id,
+                            secret_config=ts_secret_config,
+                            pii_config=ts_pii_config,
+                            hook_context={"session_id": hook_session_id} if hook_session_id else None
+                        )
+                        if transcript_warnings:
+                            warning_messages.extend(transcript_warnings)
+                            logging.warning(f"OpenCode transcript scanning found {len(transcript_warnings)} issue(s)")
+                        else:
+                            logging.info("✓ No threats detected in OpenCode transcript")
+                    elif not oc_db_path:
+                        logging.debug("OpenCode DB not found, skipping transcript scanning")
+                    elif not oc_session_id:
+                        logging.debug("No session_id in hook data, skipping OpenCode transcript scanning")
+            except Exception as e:
+                on_error = _get_on_scan_error_action()
+                if on_error == ActionMode.BLOCK:
+                    logging.error(f"OpenCode transcript scanning error (fail-closed): {e}")
+                    return format_response(ide_type, has_secrets=True, hook_event=hook_event,
+                                          error_message=f"OpenCode transcript scanning failed (blocked): {e}",
+                                          violation_type=ViolationType.SECRET_DETECTED, security_message=security_message)
+                logging.warning(f"OpenCode transcript scanning error (fail-open): {e}")
 
         # Save PreToolUse context for PostToolUse correlation (#366)
         if hook_event in (HookEvent.PRE_TOOL_USE, HookEvent.BEFORE_READ_FILE) and context_mgr and hook_tool_use_id:

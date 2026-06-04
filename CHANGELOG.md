@@ -9,6 +9,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **False positive handling documentation** (Issue #946)
+  - Added "Handling False Positives" section to COOKBOOK.md with `.gitleaksignore` format, allowlist patterns, common scenarios, and decision guide
+  - Added "False Positives" section to SECRET_SCANNING.md with quick reference table, fingerprint workflow, and recommended workflow
+
+- **Full Windows support** (Issue #872)
+  - Script-based hooks (Cline, ZooCode, Kiro) generate `.bat` files on Windows
+  - `install.ps1` PowerShell installer mirroring install.sh functionality
+  - Windows notification support in tray via PowerShell `ShowBalloonTip`
+  - Shell launch uses `COMSPEC`/`cmd.exe` instead of `SHELL`/`/bin/sh` on Windows
+  - PATH augmentation includes Windows-specific directories (Chocolatey, Scoop, LOCALAPPDATA)
+  - CI test matrix includes `windows-latest` with Python 3.9 and 3.12
+  - Fixed `os.fchmod` guards in `session_state.py` and `hook_context.py` (not available on Windows)
+  - Changed `os.rename` to `os.replace` across 8 call sites for cross-platform atomic writes
+
+- **OpenCode hook support via plugin adapter** (Issue #819)
+  - New `OpenCodeAdapter` in `hook_adapters/opencode.py` (extends ClaudeCodeAdapter)
+  - Plugin auto-discovered from `~/.config/opencode/plugins/ai-guardian.ts`
+  - Setup: `ai-guardian setup --ide opencode` (installs plugin + configures MCP server)
+  - Hook coverage: `tool.execute.before` (PreToolUse), `tool.execute.after` (PostToolUse), `chat.message` (UserPromptSubmit via parts mutation)
+  - MCP server configured in `~/.config/opencode/opencode.jsonc` with OpenCode's `type: "local"` format
+  - Same security coverage as Claude Code (secrets, PII, SSRF, prompt injection, directory blocking)
+  - Updated AGENT_SUPPORT.md with OpenCode in all tables
+
+## [1.10.0] - 2026-06-01
+
+### Changed
+
+- **Expanded default PII types** (Issue #905)
+  - Added `medical_id`, `passport`, and `uk_nin` to default `pii_types` list
+  - These types have low false-positive risk due to keyword-anchored regexes
+  - Updated in setup.py, config_loaders.py, schema, example config, and all profile templates
+  - Remaining opt-in types: `canada_sin`, `india_aadhaar`, `address`, `email`
+
+### Added
+
+- **Installer post-install improvements** (Issue #911)
+  - Run `ai-guardian doctor` as a non-fatal verification step at the end of install
+  - Add `ai-guardian daemon start` and `ai-guardian tray start` to "Next steps" output
+
+- **`--use-pinned` flag for `setup --install-scanner`** (Issue #907)
+  - Installs the pinned scanner version from `pyproject.toml` instead of latest
+  - Usage: `ai-guardian setup --install-scanner gitleaks --use-pinned`
+  - Ensures consistent scanner versions for support reproduction and tested configurations
+
+- **Combined documentation export for single-file upload** (Issue #900)
+  - Release checklist now includes generating a combined markdown file from all docs
+  - Shell one-liner documented in AGENTS.md for concatenating docs with section headers
+  - Suitable for upload to LLM tools that require single-file sources
+
 - **Language-aware prompt injection scanning** (Issue #892)
   - Uses tree-sitter AST parsing to distinguish code from comments/strings
   - Only comments and string literals are scanned for injection in source files
@@ -43,6 +92,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Tray menu: "Metrics" renamed to "Metrics & Audit"
 
 ### Fixed
+
+- **`doctor --fix` now refreshes stale pattern cache** (Issue #916)
+  - `check_ps_cache_freshness` sets `fixable=True` for stale, expired, and missing cache
+  - When `--fix` is passed, attempts to fetch fresh patterns from pattern server
+  - Reports success/failure with specific error messages
+
+- **Connection string patterns false positive on placeholder passwords** (Issue #919)
+  - `mongodb-connection`, `mysql-connection`, `postgres-connection`, and `redis-connection`
+    no longer match placeholder passwords like `[HIDDEN]`, `[REDACTED]`, `<password>`, or
+    repeated characters (`xxxxxxxx`) in documentation examples
+  - New `connection_not_placeholder` validator added to the TOML patterns validation pipeline
+
+- **env-variable pattern false positives on Python code and documentation** (Issue #912)
+  - Tightened regex to require 2+ character uppercase env var names (rejects `_ = ...`)
+  - Validator now skips values starting with `_` (Python identifiers like `_load_config_file`)
+  - Validator now detects placeholder values (`your-...`, `example-...`, `test-...`, etc.)
+  - AST-aware scanning for secret detection: tree-sitter extracts only comments and strings
+    from code files, skipping code syntax that matches secret patterns
+
+- **Windows: setup uses pythonw.exe to minimize console window flash** (Issue #902)
+  - `ai-guardian setup` now uses `pythonw.exe -m ai_guardian` on Windows instead
+    of console-mode `ai-guardian.EXE`, avoiding visible window on every hook call
+  - Optional VBS wrapper generated during setup for fully hidden execution
+  - All agent adapters (Claude Code, Cursor, Copilot, Codex, Windsurf, Gemini, Augment) use pythonw on Windows
+  - `_is_ai_guardian_command()` extended to handle Windows backslash paths, `.exe` suffix, and pythonw invocations
+  - macOS and Linux behavior is unchanged
 
 - **Remove bypass hints from hook block messages** (Issue #897, #896)
   - Hook responses no longer include annotation syntax, allowlist instructions,
@@ -232,6 +307,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Engine Configuration page: multi-engine strategy, JSON engines editor
   - Secret Redaction page: toggle, action mode, options, custom patterns, stats
   - Sidebar navigation expanded with Permissions and Secrets groups
+
+### Fixed
+
+- **Secret scanning no longer blocks PII types excluded from `pii_types` config** (Issue #903)
+  - The `toml-patterns` scanner was unconditionally loading ALL PII patterns from `pii.toml`
+  - Email addresses (and other excluded PII types) triggered "Secret Detected" blocks
+    even when explicitly excluded from `scan_pii.pii_types`
+  - Scanner now reads `pii_types` from the PII config and filters findings accordingly
+  - Secret findings (API keys, tokens, etc.) are never affected by this filter
+
+## [1.9.1] - 2026-05-27
+
+### Fixed
+
+- **Cursor adapter misdetection for Gemini beforeReadFile events** (Issue #847)
+  - Default `tool_name` to `Read` for `beforeReadFile` events
+  - Prevent Gemini adapter from claiming Cursor `beforeReadFile` events
 
 ## [1.9.0] - 2026-05-26
 
@@ -2197,7 +2289,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Preserves existing configuration
   - Interactive and non-interactive modes
 
-[Unreleased]: https://github.com/itdove/ai-guardian/compare/v1.9.0...HEAD
+[Unreleased]: https://github.com/itdove/ai-guardian/compare/v1.10.0...HEAD
+[1.10.0]: https://github.com/itdove/ai-guardian/compare/v1.9.1...v1.10.0
+[1.9.1]: https://github.com/itdove/ai-guardian/compare/v1.9.0...v1.9.1
 [1.9.0]: https://github.com/itdove/ai-guardian/compare/v1.8.1...v1.9.0
 [1.8.1]: https://github.com/itdove/ai-guardian/compare/v1.8.0...v1.8.1
 [1.8.0]: https://github.com/itdove/ai-guardian/compare/v1.7.0...v1.8.0

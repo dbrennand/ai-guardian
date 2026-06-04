@@ -11,6 +11,7 @@ import io
 import json
 import logging
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -27,7 +28,15 @@ except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
 
 
 def _resolve_binary_path() -> str:
-    """Resolve absolute path to ai-guardian binary at setup time."""
+    """Resolve absolute path to ai-guardian binary at setup time.
+
+    On Windows, prefers ``pythonw.exe -m ai_guardian`` to avoid console
+    window flash on every hook invocation (see issue #902).
+    """
+    if platform.system() == "Windows":
+        pythonw = Path(sys.executable).parent / "pythonw.exe"
+        if pythonw.exists():
+            return f"{pythonw} -m ai_guardian"
     path = shutil.which("ai-guardian")
     if path:
         return path
@@ -40,12 +49,57 @@ def _resolve_binary_path() -> str:
 def _is_ai_guardian_command(cmd: str) -> bool:
     """Check if a command string refers to ai-guardian (bare or absolute path).
 
-    Handles commands with trailing arguments like ``--ide cursor``.
+    Handles commands with trailing arguments like ``--ide cursor``,
+    Windows backslash paths, ``.exe`` suffixes, and the
+    ``pythonw.exe -m ai_guardian`` invocation used on Windows.
     """
     if not cmd:
         return False
     first_token = cmd.split()[0]
-    return first_token == "ai-guardian" or first_token.endswith("/ai-guardian")
+    base = Path(first_token).stem
+    if base in ("ai-guardian", "ai-guardian.exe"):
+        return True
+    if first_token == "ai-guardian" or first_token.endswith(("/ai-guardian", "\\ai-guardian")):
+        return True
+    if first_token.endswith(("/ai-guardian.exe", "\\ai-guardian.exe")):
+        return True
+    if "-m" in cmd and "ai_guardian" in cmd:
+        return True
+    return False
+
+
+def _walk_commands(obj, predicate, transform, *, copy=True):
+    """Walk a config tree, applying *transform* to ``command`` values matching *predicate*.
+
+    Args:
+        obj: Config structure (dict, list, or scalar).
+        predicate: ``callable(value) -> bool`` — whether to transform this command value.
+        transform: ``callable(value) -> new_value``.
+        copy: If ``True``, return a new object tree. If ``False``, mutate *obj* in place.
+    """
+    if isinstance(obj, dict):
+        if copy:
+            result = {}
+            for k, v in obj.items():
+                if k == "command" and predicate(v):
+                    result[k] = transform(v)
+                else:
+                    result[k] = _walk_commands(v, predicate, transform, copy=True)
+            return result
+        else:
+            for k, v in obj.items():
+                if k == "command" and predicate(v):
+                    obj[k] = transform(v)
+                else:
+                    _walk_commands(v, predicate, transform, copy=False)
+    elif isinstance(obj, list):
+        if copy:
+            return [_walk_commands(item, predicate, transform, copy=True) for item in obj]
+        else:
+            for item in obj:
+                _walk_commands(item, predicate, transform, copy=False)
+    elif copy:
+        return obj
 
 
 def _substitute_command(obj, abs_path: str, ide_type: str = None):
@@ -54,20 +108,13 @@ def _substitute_command(obj, abs_path: str, ide_type: str = None):
     When *ide_type* is provided the ``--ide <name>`` flag is appended so the
     hook command explicitly declares which adapter to use.
     """
-    if isinstance(obj, dict):
-        result = {}
-        for k, v in obj.items():
-            if k == "command" and v == "ai-guardian":
-                cmd = abs_path
-                if ide_type:
-                    cmd = f"{abs_path} --ide {ide_type}"
-                result[k] = cmd
-            else:
-                result[k] = _substitute_command(v, abs_path, ide_type)
-        return result
-    elif isinstance(obj, list):
-        return [_substitute_command(item, abs_path, ide_type) for item in obj]
-    return obj
+    cmd = f"{abs_path} --ide {ide_type}" if ide_type else abs_path
+    return _walk_commands(
+        obj,
+        predicate=lambda v: v in ("ai-guardian", "ai-guardian.exe"),
+        transform=lambda _v: cmd,
+        copy=True,
+    )
 
 
 def _upgrade_ide_flag(obj, ide_type: str):
@@ -77,16 +124,34 @@ def _upgrade_ide_flag(obj, ide_type: str):
     version may not carry the ``--ide`` flag.  This helper walks the merged
     config and upgrades them in place.
     """
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            if k == "command" and isinstance(v, str) and _is_ai_guardian_command(v):
-                if "--ide" not in v:
-                    obj[k] = f"{v} --ide {ide_type}"
-            else:
-                _upgrade_ide_flag(v, ide_type)
-    elif isinstance(obj, list):
-        for item in obj:
-            _upgrade_ide_flag(item, ide_type)
+    _walk_commands(
+        obj,
+        predicate=lambda v: isinstance(v, str) and _is_ai_guardian_command(v) and "--ide" not in v,
+        transform=lambda v: f"{v} --ide {ide_type}",
+        copy=False,
+    )
+
+
+def _create_vbs_wrapper(cmd: str, config_dir: Path) -> Optional[Path]:
+    """Create a VBS wrapper for fully hidden execution on Windows.
+
+    The wrapper uses ``WScript.Shell.Run`` with window style 0 (hidden) so
+    that neither ``pythonw.exe`` nor a transient console flash is visible.
+    Users can point their hook command to
+    ``wscript.exe <path>`` for maximum suppression.
+
+    Returns the path to the generated ``.vbs`` file, or *None* on non-Windows.
+    """
+    if platform.system() != "Windows":
+        return None
+    vbs_path = config_dir / "ai-guardian-hook.vbs"
+    content = (
+        'Set WshShell = CreateObject("WScript.Shell")\n'
+        f'WshShell.Run "{cmd}", 0, True\n'
+    )
+    config_dir.mkdir(parents=True, exist_ok=True)
+    vbs_path.write_text(content, encoding="utf-8")
+    return vbs_path
 
 
 def _notify_daemon_reload():
@@ -436,6 +501,13 @@ class IDESetup:
             "config_dir_env_var": None,
             "config_filename": None,
             "extension_based": True,
+        },
+        "opencode": {
+            "name": "OpenCode",
+            "config_path": "~/.config/opencode/plugins",
+            "config_dir_env_var": None,
+            "config_filename": None,
+            "plugin_file": True,
         },
         "augment": {
             "name": "Augment Code",
@@ -1040,8 +1112,21 @@ class IDESetup:
                     return False
                 config_path = legacy_file
 
-            # Extension-based hooks (AiderDesk, OpenClaw): check directory for index.ts
             ide_config = self.IDE_CONFIGS.get(ide_type, {})
+
+            # Plugin-file hooks (OpenCode): check for ai-guardian.ts
+            if ide_config.get("plugin_file"):
+                plugin_file = config_path / "ai-guardian.ts"
+                if plugin_file.exists():
+                    try:
+                        content = plugin_file.read_text(encoding="utf-8")
+                        if "ai-guardian" in content:
+                            return True
+                    except Exception:
+                        pass
+                return False
+
+            # Extension-based hooks (AiderDesk, OpenClaw): check directory for index.ts
             if ide_config.get("extension_based"):
                 ext_dir = config_path if config_path.is_dir() else config_path.parent
                 index_path = ext_dir / "index.ts"
@@ -1059,14 +1144,18 @@ class IDESetup:
                 hooks_dir = config_path if config_path.is_dir() else config_path.parent
                 ide_config = self.IDE_CONFIGS.get(ide_type, {})
                 for script_name in ide_config.get("hook_scripts", []):
-                    script_path = hooks_dir / script_name
-                    if script_path.exists():
-                        try:
-                            content = script_path.read_text(encoding="utf-8")
-                            if "ai-guardian" in content:
-                                return True
-                        except Exception:
-                            pass
+                    candidates = [hooks_dir / script_name]
+                    if platform.system() == "Windows":
+                        candidates.append(hooks_dir / f"{script_name}.bat")
+                        candidates.append(hooks_dir / f"{script_name}.ps1")
+                    for script_path in candidates:
+                        if script_path.exists():
+                            try:
+                                content = script_path.read_text(encoding="utf-8")
+                                if "ai-guardian" in content:
+                                    return True
+                            except Exception:
+                                pass
                 return False
 
             if ide_type == "codex":
@@ -1161,16 +1250,22 @@ class IDESetup:
         """
         ide_name = ide_config["name"]
         hook_scripts = ide_config.get("hook_scripts", [])
-        script_content = ide_config.get("script_content", "#!/bin/sh\nai-guardian\n")
+        is_windows = platform.system() == "Windows"
 
         abs_path = _resolve_binary_path()
         cmd = f"{abs_path} --ide {ide_type}"
-        script_content = script_content.replace("ai-guardian", cmd, 1)
+
+        if is_windows:
+            script_content = f"@echo off\r\n{cmd}\r\n"
+        else:
+            script_content = ide_config.get("script_content", "#!/bin/sh\nai-guardian\n")
+            script_content = script_content.replace("ai-guardian", cmd, 1)
 
         if dry_run:
             message = f"[DRY RUN] Would configure {ide_name} hooks at {hooks_dir}:\n"
             for script_name in hook_scripts:
-                message += f"  Create: {hooks_dir / script_name}\n"
+                fname = f"{script_name}.bat" if is_windows else script_name
+                message += f"  Create: {hooks_dir / fname}\n"
             message += f"  Script content:\n    {script_content.strip()}\n"
             return True, message
 
@@ -1178,10 +1273,12 @@ class IDESetup:
 
         created = []
         for script_name in hook_scripts:
-            script_path = hooks_dir / script_name
+            fname = f"{script_name}.bat" if is_windows else script_name
+            script_path = hooks_dir / fname
             script_path.write_text(script_content, encoding="utf-8")
-            script_path.chmod(0o755)
-            created.append(script_name)
+            if not is_windows:
+                script_path.chmod(0o755)
+            created.append(fname)
 
         gitleaks_installed, gitleaks_message = self.verify_gitleaks_installed()
 
@@ -1201,6 +1298,92 @@ class IDESetup:
             message += f"  2. Restart {ide_name} for changes to take effect\n"
         else:
             message += f"  1. Restart {ide_name} for changes to take effect\n"
+
+        return True, message
+
+    @staticmethod
+    @staticmethod
+    def _strip_jsonc_comments(text: str) -> str:
+        """Strip single-line (//) and multi-line (/* */) comments from JSONC.
+
+        Quote-aware: skips // and /* inside JSON string literals.
+        """
+        import re
+        result = []
+        i = 0
+        in_string = False
+        while i < len(text):
+            c = text[i]
+            if in_string:
+                result.append(c)
+                if c == '\\' and i + 1 < len(text):
+                    i += 1
+                    result.append(text[i])
+                elif c == '"':
+                    in_string = False
+            elif c == '"':
+                in_string = True
+                result.append(c)
+            elif c == '/' and i + 1 < len(text) and text[i + 1] == '/':
+                while i < len(text) and text[i] != '\n':
+                    i += 1
+                continue
+            elif c == '/' and i + 1 < len(text) and text[i + 1] == '*':
+                end = text.find('*/', i + 2)
+                i = end + 2 if end != -1 else len(text)
+                continue
+            else:
+                result.append(c)
+            i += 1
+        stripped = ''.join(result)
+        stripped = re.sub(r',\s*([}\]])', r'\1', stripped)
+        return stripped
+
+    def _setup_plugin_file(
+        self,
+        ide_type: str,
+        ide_config: Dict,
+        plugins_dir: Path,
+        dry_run: bool = False,
+    ) -> Tuple[bool, str]:
+        """Setup plugin-file based hooks (OpenCode).
+
+        Drops a single .ts file into the IDE's plugins directory.
+        """
+        ide_name = ide_config["name"]
+        plugin_file = plugins_dir / "ai-guardian.ts"
+
+        if dry_run:
+            message = f"[DRY RUN] Would configure {ide_name} plugin:\n"
+            message += f"  Create: {plugin_file}\n"
+            return True, message
+
+        plugins_dir.mkdir(parents=True, exist_ok=True)
+
+        abs_path = _resolve_binary_path()
+        cmd = f"{abs_path} --ide {ide_type}"
+        plugin_file.write_text(
+            _OPENCODE_PLUGIN_TS.replace("execSync('ai-guardian'", f"execSync('{cmd}'"),
+            encoding="utf-8",
+        )
+
+        gitleaks_installed, gitleaks_message = self.verify_gitleaks_installed()
+
+        message = f"✓ Successfully configured {ide_name} plugin at {plugin_file}\n"
+        message += f"\n  {gitleaks_message}\n"
+
+        if not gitleaks_installed:
+            message += (
+                "\n  ⚠️  WARNING: Secret scanning will be disabled without Gitleaks!\n"
+                "      AI Guardian requires Gitleaks for secret detection.\n"
+            )
+
+        message += f"\n  Next steps:\n"
+        step = 1
+        if not gitleaks_installed:
+            message += f"  {step}. Install Gitleaks (see above)\n"
+            step += 1
+        message += f"  {step}. Restart {ide_name} for the plugin to load\n"
 
         return True, message
 
@@ -1313,6 +1496,10 @@ class IDESetup:
             if not force and self.check_hooks_configured(config_path, ide_type):
                 return False, f"ai-guardian hooks already configured for {ide_name}. Use --force to overwrite."
 
+            # Plugin-file IDEs (OpenCode): drop a single .ts file in plugins dir
+            if ide_config.get("plugin_file"):
+                return self._setup_plugin_file(ide_type, ide_config, config_path, dry_run)
+
             # Extension-based IDEs (AiderDesk): create TypeScript extension
             if ide_config.get("extension_based"):
                 return self._setup_extension_based_hooks(ide_type, ide_config, config_path, dry_run)
@@ -1383,11 +1570,23 @@ class IDESetup:
                 json.dump(merged_config, f, indent=2)
                 f.write('\n')  # Add trailing newline
 
+            # Generate VBS wrapper on Windows for fully hidden execution
+            vbs_path = _create_vbs_wrapper(
+                f"{abs_path} --ide {ide_type}", config_path.parent
+            )
+
             # Verify Gitleaks installation
             gitleaks_installed, gitleaks_message = self.verify_gitleaks_installed()
 
             message = f"✓ Successfully configured {ide_name} hooks at {config_path}\n"
             message += f"\n  {gitleaks_message}\n"
+
+            if vbs_path:
+                message += (
+                    f"\n  Windows: VBS wrapper created at {vbs_path}\n"
+                    f"  To fully hide console windows, change the hook command to:\n"
+                    f'    wscript.exe "{vbs_path}"\n'
+                )
 
             # Display hook ordering warnings if any
             if hook_warnings:
@@ -1656,6 +1855,8 @@ def create_default_config(
         else:
             config = _get_default_config_template(permissive)
 
+        config = _strip_deprecated_config_keys(config)
+
         if json_output:
             return True, json.dumps(config, indent=2)
 
@@ -1706,6 +1907,15 @@ def create_default_config(
 
     except Exception as e:
         return False, f"Error creating default config: {e}"
+
+
+def _strip_deprecated_config_keys(config: Dict) -> Dict:
+    """Remove deprecated config keys so new configs never contain them."""
+    ss = config.get("secret_scanning")
+    if isinstance(ss, dict):
+        ss.pop("pattern_server", None)
+    config.pop("pattern_server", None)
+    return config
 
 
 def _get_default_config_template(permissive: bool = False) -> Dict:
@@ -1794,10 +2004,10 @@ def _get_default_config_template(permissive: bool = False) -> Dict:
             "additional_patterns": []
         },
 
-        "_comment_scan_pii": "PII detection for GDPR/CCPA compliance (v1.6.0+). Phase 1: SSN, credit card, phone, US passport, IBAN, international phone. Phase 2 (v1.8.0): medical_id, passport, canada_sin, uk_nin, india_aadhaar, address (all opt-in). Email also opt-in.",
+        "_comment_scan_pii": "PII detection for GDPR/CCPA compliance (v1.6.0+). Phase 1: SSN, credit card, phone, US passport, IBAN, international phone. Phase 2 defaults (v1.10.0): medical_id, passport, uk_nin. Opt-in: canada_sin, india_aadhaar, address, email.",
         "scan_pii": {
             "enabled": True,
-            "pii_types": ["ssn", "credit_card", "phone", "us_passport", "iban", "intl_phone"],
+            "pii_types": ["ssn", "credit_card", "phone", "us_passport", "iban", "intl_phone", "medical_id", "passport", "uk_nin"],
             "action": "block",
             "ignore_files": [],
             "ignore_tools": [],
@@ -2354,6 +2564,7 @@ def setup_hooks(
     auto_install_hooks: bool = False,
     uninstall_hooks: bool = False,
     install_scanner: Optional[List[str]] = None,
+    use_pinned: bool = False,
     json_output: bool = False,
     profile: Optional[str] = None,
     save_profile: Optional[str] = None,
@@ -2440,7 +2651,10 @@ def setup_hooks(
     # Handle scanner installation if requested (NEW in v1.6.0)
     if install_scanner:
         if dry_run:
-            print(f"[DRY RUN] Would install scanner(s): {', '.join(install_scanner)}")
+            if use_pinned:
+                print(f"[DRY RUN] Would install pinned scanner(s): {', '.join(install_scanner)}")
+            else:
+                print(f"[DRY RUN] Would install scanner(s): {', '.join(install_scanner)}")
         else:
             try:
                 from ai_guardian.scanner_installer import ScannerInstaller
@@ -2450,7 +2664,11 @@ def setup_hooks(
                 for scanner_name in install_scanner:
                     print(f"\n🛡️  Installing {scanner_name} scanner...\n")
 
-                    success = installer.install(scanner_name, ensure_only=True)
+                    success = installer.install(
+                        scanner_name,
+                        use_pinned=use_pinned,
+                        ensure_only=not use_pinned,
+                    )
 
                     if success:
                         if installer.verify_installation(scanner_name):
@@ -2649,6 +2867,7 @@ def _setup_hooks_json_output(
         else:
             ag_config = _get_default_config_template(permissive)
 
+        ag_config = _strip_deprecated_config_keys(ag_config)
         result["ai_guardian_config"] = ag_config
 
         if not dry_run:
@@ -2816,6 +3035,11 @@ _MCP_IDE_CONFIGS = {
         "config_key": "mcpServers",
         "skill_dir": ".openclaw/skills",
     },
+    "opencode": {
+        "config_file": "~/.config/opencode/opencode.jsonc",
+        "config_key": "mcp",
+        "skill_dir": ".opencode/skills",
+    },
 }
 
 _MCP_SERVER_ENTRY = {
@@ -2844,7 +3068,12 @@ def _install_mcp_config(setup: IDESetup, ide_type: str, dry_run: bool = False) -
         print(f"  MCP: IDE '{ide_type}' not supported for MCP server")
         return
 
-    config_path = Path(mcp_ide.get("config_file", "")).expanduser()
+    config_file = mcp_ide.get("config_file", "")
+    if not config_file:
+        print(f"  MCP: IDE '{ide_type}' has no user-level MCP config path, skipping")
+        return
+
+    config_path = Path(config_file).expanduser()
 
     if dry_run:
         print(f"  MCP: Would add ai-guardian MCP server to {config_path}")
@@ -2879,15 +3108,28 @@ def _install_mcp_config(setup: IDESetup, ide_type: str, dry_run: bool = False) -
     if config_path.exists():
         try:
             with open(config_path, "r") as f:
-                config = json.load(f)
+                raw = f.read()
+            if config_path.suffix == ".jsonc":
+                raw = IDESetup._strip_jsonc_comments(raw)
+            if raw.strip():
+                config = json.loads(raw)
         except (json.JSONDecodeError, OSError):
             pass
 
     # Add MCP server entry with absolute path
     abs_path = _resolve_binary_path()
-    mcp_entry = dict(_MCP_SERVER_ENTRY)
-    mcp_entry["command"] = abs_path
     key = mcp_ide["config_key"]
+
+    if ide_type == "opencode":
+        mcp_entry = {
+            "type": "local",
+            "command": [abs_path, "mcp-server"],
+            "enabled": True,
+        }
+    else:
+        mcp_entry = dict(_MCP_SERVER_ENTRY)
+        mcp_entry["command"] = abs_path
+
     if key not in config:
         config[key] = {}
     config[key]["ai-guardian"] = mcp_entry
@@ -2923,7 +3165,11 @@ def _remove_mcp_config(setup: IDESetup, ide_type: str, dry_run: bool = False) ->
     if not mcp_ide:
         return
 
-    config_path = Path(mcp_ide.get("config_file", "")).expanduser()
+    config_file = mcp_ide.get("config_file", "")
+    if not config_file:
+        return
+
+    config_path = Path(config_file).expanduser()
 
     if dry_run:
         print(f"  MCP: Would remove ai-guardian MCP server from {config_path}")
@@ -3187,6 +3433,136 @@ export default class AiGuardianExtension implements Extension {
 
 
 # OpenClaw plugin file contents (Issue #640)
+_OPENCODE_PLUGIN_TS = """\
+import type { Plugin } from '@opencode-ai/plugin';
+import { execSync } from 'child_process';
+
+interface GuardianResult {
+  blocked: boolean;
+  error?: string;
+  output?: string;
+}
+
+function runGuardian(hookData: Record<string, unknown>): GuardianResult {
+  try {
+    const input = JSON.stringify(hookData);
+    const result = execSync('ai-guardian', {
+      input,
+      encoding: 'utf-8',
+      timeout: 30000,
+      env: { ...process.env, AI_GUARDIAN_IDE_TYPE: 'opencode' },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    const stdout = result?.trim() || '';
+    if (stdout) {
+      try {
+        const parsed = JSON.parse(stdout);
+        if (parsed._blocked) {
+          const msg = parsed.systemMessage
+            || JSON.parse(parsed.output || '{}').systemMessage
+            || 'Blocked by ai-guardian';
+          return { blocked: true, error: msg, output: stdout };
+        }
+        const inner = parsed.output ? JSON.parse(parsed.output) : parsed;
+        if (inner.decision === 'block') {
+          return { blocked: true, error: inner.reason || 'Blocked by ai-guardian', output: stdout };
+        }
+        if (inner.hookSpecificOutput?.permissionDecision === 'deny') {
+          return { blocked: true, error: inner.systemMessage || 'Blocked by ai-guardian', output: stdout };
+        }
+      } catch {}
+    }
+    return { blocked: false, output: stdout || undefined };
+  } catch (err: any) {
+    if (err.status === 1) {
+      const errorMsg =
+        err.stderr?.toString().trim() || 'Blocked by ai-guardian';
+      return { blocked: true, error: errorMsg };
+    }
+    return { blocked: false };
+  }
+}
+
+export const AiGuardian: Plugin = async (ctx) => {
+  const cwd = ctx.directory || process.cwd();
+
+  return {
+    async 'tool.execute.before'(input, output) {
+      if (input.tool?.startsWith('ai-guardian')) return;
+      const hookData = {
+        hook_event_name: 'tool.execute.before',
+        opencode_version: '1.0.0',
+        hook_source: 'opencode',
+        tool_name: input.tool,
+        tool_use: { name: input.tool, input: output.args || {} },
+        session_id: input.sessionID,
+        tool_use_id: input.callID,
+        cwd,
+      };
+      const result = runGuardian(hookData);
+      if (result.blocked) {
+        throw new Error(result.error || 'Blocked by ai-guardian');
+      }
+    },
+
+    async 'chat.message'(input, output) {
+      const text = (output.parts || [])
+        .filter((p) => p.type === 'text' && !p.synthetic)
+        .map((p) => p.text || p.content || '')
+        .join('\\n');
+      if (!text) return;
+      const hookData = {
+        hook_event_name: 'message.submit',
+        opencode_version: '1.0.0',
+        hook_source: 'opencode',
+        prompt: text,
+        session_id: input.sessionID,
+        cwd,
+      };
+      const result = runGuardian(hookData);
+      if (result.blocked) {
+        const firstPart = output.parts[0] || {};
+        output.parts.length = 0;
+        output.parts.push({
+          ...firstPart,
+          type: 'text',
+          text: '🛡️ ai-guardian: Secret detected in user message. Original content removed for security. Tell the user their message was blocked because it contained a secret. Do NOT attempt to recover the original content.',
+          synthetic: true,
+        });
+      }
+    },
+
+    async 'tool.execute.after'(input, output) {
+      if (input.tool?.startsWith('ai-guardian')) return;
+      const hookData = {
+        hook_event_name: 'tool.execute.after',
+        opencode_version: '1.0.0',
+        hook_source: 'opencode',
+        tool_name: input.tool,
+        tool_response: { output: output.output || '' },
+        tool_use: { name: input.tool, input: input.args || {} },
+        session_id: input.sessionID,
+        tool_use_id: input.callID,
+        cwd,
+      };
+      const result = runGuardian(hookData);
+      if (result.blocked) {
+        throw new Error(result.error || 'Blocked by ai-guardian');
+      }
+      if (result.output) {
+        try {
+          const parsed = JSON.parse(result.output);
+          const hookOutput = JSON.parse(parsed.output || '{}').hookSpecificOutput;
+          if (hookOutput?.updatedToolOutput) {
+            output.output = hookOutput.updatedToolOutput;
+          }
+        } catch {}
+      }
+    },
+  };
+};
+"""
+
 _OPENCLAW_PACKAGE_JSON = """\
 {
   "name": "ai-guardian-openclaw",

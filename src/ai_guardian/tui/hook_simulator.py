@@ -43,6 +43,7 @@ IDE_OPTIONS = [
     ("Cursor", "cursor"),
     ("GitHub Copilot", "copilot"),
     ("Codex", "codex"),
+    ("OpenCode", "opencode"),
 ]
 
 

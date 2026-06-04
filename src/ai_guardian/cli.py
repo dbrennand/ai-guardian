@@ -78,6 +78,13 @@ def _ensure_daemon_started():
 
 def main():
     """Main entry point for the hook."""
+    if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError):
+            pass
+
     # If arguments are provided, handle them
     if len(sys.argv) > 1:
         parser = argparse.ArgumentParser(
@@ -92,7 +99,7 @@ def main():
         )
         parser.add_argument(
             "--ide",
-            choices=["claude", "cursor", "copilot", "codex", "windsurf", "gemini", "cline", "zoocode", "augment", "kiro", "junie", "aiderdesk", "openclaw"],
+            choices=["claude", "cursor", "copilot", "codex", "windsurf", "gemini", "cline", "zoocode", "augment", "kiro", "junie", "aiderdesk", "openclaw", "opencode"],
             help="Specify IDE adapter for hook processing (auto-detected if not provided)"
         )
 
@@ -106,7 +113,7 @@ def main():
         )
         setup_parser.add_argument(
             "--ide",
-            choices=["claude", "cursor", "copilot", "codex", "windsurf", "gemini", "cline", "zoocode", "augment", "kiro", "junie", "aiderdesk", "openclaw"],
+            choices=["claude", "cursor", "copilot", "codex", "windsurf", "gemini", "cline", "zoocode", "augment", "kiro", "junie", "aiderdesk", "openclaw", "opencode"],
             help="Specify IDE type (auto-detected if not provided)"
         )
         setup_parser.add_argument(
@@ -166,6 +173,11 @@ def main():
             choices=["gitleaks", "betterleaks", "leaktk"],
             help="Install scanner engine(s) (default: gitleaks). "
                  "Accepts multiple: --install-scanner gitleaks betterleaks"
+        )
+        setup_parser.add_argument(
+            "--use-pinned",
+            action="store_true",
+            help="Install pinned scanner version from pyproject.toml (use with --install-scanner)"
         )
         setup_parser.add_argument(
             "--json",
@@ -982,6 +994,7 @@ def main():
                 auto_install_hooks=args.auto_install_hooks,
                 uninstall_hooks=args.uninstall_hooks,
                 install_scanner=install_scanner,
+                use_pinned=args.use_pinned,
                 json_output=args.json_output,
                 profile=args.profile,
                 save_profile=args.save_profile,
@@ -1445,6 +1458,7 @@ def main():
                 import traceback
                 traceback.print_exc()
                 return 1
+
 
         # If --ide specified but no subcommand, set env var and fall through to hook mode
         if not args.command and getattr(args, 'ide', None):

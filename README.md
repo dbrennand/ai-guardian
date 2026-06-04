@@ -36,7 +36,11 @@ See [Security Design](https://github.com/itdove/ai-guardian/blob/main/docs/SECUR
 **One-line install** (creates config, installs scanner, sets up hooks):
 
 ```bash
+# Linux / macOS
 curl -fsSL https://raw.githubusercontent.com/itdove/ai-guardian/main/install.sh | bash -s -- --ide claude
+
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/itdove/ai-guardian/main/install.ps1 | iex
 ```
 
 Or install manually:
@@ -90,7 +94,8 @@ ai-guardian setup --ide claude --create-config --profile @strict --install-scann
 |---------|-------------|------|
 | Secret Scanning | Multi-layered detection of API keys, tokens, passwords | [docs/security/SECRET_SCANNING.md](https://github.com/itdove/ai-guardian/blob/main/docs/security/SECRET_SCANNING.md) |
 | PII Detection | Detect personally identifiable information | [docs/security/SECRET_SCANNING.md](https://github.com/itdove/ai-guardian/blob/main/docs/security/SECRET_SCANNING.md) |
-| Prompt Injection | Heuristic detection with configurable sensitivity | [docs/security/PROMPT_INJECTION.md](https://github.com/itdove/ai-guardian/blob/main/docs/security/PROMPT_INJECTION.md) |
+| Prompt Injection | Language-aware detection with tree-sitter AST parsing and configurable sensitivity | [docs/security/PROMPT_INJECTION.md](https://github.com/itdove/ai-guardian/blob/main/docs/security/PROMPT_INJECTION.md) |
+| Image Scanning | OCR-based secret and PII detection in screenshots and images | [docs/security/IMAGE_SCANNING.md](https://github.com/itdove/ai-guardian/blob/main/docs/security/IMAGE_SCANNING.md) |
 | Unicode Attack Detection | Zero-width chars, bidi override, homoglyphs | [docs/security/UNICODE_ATTACKS.md](https://github.com/itdove/ai-guardian/blob/main/docs/security/UNICODE_ATTACKS.md) |
 | SSRF Protection | Block private IPs, cloud metadata, dangerous schemes | [docs/security/SSRF_PROTECTION.md](https://github.com/itdove/ai-guardian/blob/main/docs/security/SSRF_PROTECTION.md) |
 | Config File Scanning | Detect exfiltration of sensitive config files | [docs/security/CREDENTIAL_EXFILTRATION.md](https://github.com/itdove/ai-guardian/blob/main/docs/security/CREDENTIAL_EXFILTRATION.md) |
@@ -232,6 +237,7 @@ Each detection feature (`secret_scanning`, `secret_redaction`, `ssrf_protection`
 ## Requirements
 
 - **Python 3.9+** (3.10+ highly recommended — several features including AST-aware scanning, MCP server, and web console require Python 3.10+)
+- **Windows**: Python 3.10, 3.13, and 3.14 are tested; other versions may work but are not CI-verified
 - **Scanner engine**: gitleaks, betterleaks, leaktk, trufflehog, detect-secrets, secretlint, or gitguardian
 - **GNOME Linux**: AppIndicator extension for system tray icon ([setup steps](https://github.com/itdove/ai-guardian/blob/main/docs/CONSOLE.md#getting-started))
 
