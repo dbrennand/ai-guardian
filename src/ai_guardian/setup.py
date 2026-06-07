@@ -19,6 +19,8 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import tomli_w
+
 from ai_guardian.config_utils import get_cache_dir, get_config_dir
 
 try:
@@ -183,46 +185,35 @@ def _strip_managed_block(text: str, begin_marker: str, end_marker: str) -> str:
     return f"{stripped}\n" if stripped else ""
 
 
-def _toml_serialize(value: Any) -> str:
-    """Serialize a small subset of TOML values used by Codex config helpers."""
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, int):
-        return str(value)
-    if isinstance(value, list):
-        return "[" + ", ".join(_toml_serialize(v) for v in value) + "]"
-    return json.dumps(str(value))
-
-
 def _render_codex_hooks_toml(hooks_config: Dict[str, List[Dict]]) -> str:
     """Render ai-guardian's managed Codex hooks as inline TOML tables."""
-    lines = [_CODEX_MANAGED_HOOKS_BEGIN]
-    for event_name, hook_entries in hooks_config.items():
-        for entry in hook_entries:
-            lines.append(f"[[hooks.{event_name}]]")
-            matcher = entry.get("matcher")
-            if matcher is not None:
-                lines.append(f"matcher = {_toml_serialize(matcher)}")
-            for hook in entry.get("hooks", []):
-                lines.append(f"[[hooks.{event_name}.hooks]]")
-                for key in ("type", "command", "timeout", "statusMessage"):
-                    if key in hook:
-                        lines.append(f"{key} = {_toml_serialize(hook[key])}")
-            lines.append("")
-    lines.append(_CODEX_MANAGED_HOOKS_END)
-    return "\n".join(lines).strip() + "\n"
+    return "\n".join(
+        [
+            _CODEX_MANAGED_HOOKS_BEGIN,
+            tomli_w.dumps({"hooks": hooks_config}).strip(),
+            _CODEX_MANAGED_HOOKS_END,
+        ]
+    ).strip() + "\n"
 
 
 def _render_codex_mcp_toml(command: str, args: List[str]) -> str:
     """Render ai-guardian's Codex MCP server block as inline TOML."""
-    lines = [
-        _CODEX_MANAGED_MCP_BEGIN,
-        "[mcp_servers.ai-guardian]",
-        f"command = {_toml_serialize(command)}",
-        f"args = {_toml_serialize(args)}",
-        _CODEX_MANAGED_MCP_END,
-    ]
-    return "\n".join(lines).strip() + "\n"
+    return "\n".join(
+        [
+            _CODEX_MANAGED_MCP_BEGIN,
+            tomli_w.dumps(
+                {
+                    "mcp_servers": {
+                        "ai-guardian": {
+                            "command": command,
+                            "args": args,
+                        }
+                    }
+                }
+            ).strip(),
+            _CODEX_MANAGED_MCP_END,
+        ]
+    ).strip() + "\n"
 
 
 class IDESetup:

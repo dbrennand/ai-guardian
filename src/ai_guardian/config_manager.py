@@ -5,17 +5,18 @@ Configuration Manager for ai-guardian
 Manages installation config, user config, and project config files.
 """
 
-import os
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import tomli_w
+
 from ai_guardian.config_utils import get_config_dir
 
 try:
-    import toml
-except ImportError:
-    toml = None
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
+    import tomli as tomllib  # type: ignore
 
 
 class ConfigManager:
@@ -50,10 +51,6 @@ class ConfigManager:
         Returns:
             bool: True if successful, False otherwise
         """
-        if toml is None:
-            print("Error: toml library not installed", file=sys.stderr)
-            return False
-
         try:
             # Ensure config directory exists
             self.config_dir.mkdir(parents=True, exist_ok=True)
@@ -66,14 +63,14 @@ class ConfigManager:
 
             # Create or update installation config
             config = {"url": url}
-
-            with open(self.installation_config_path, 'w') as f:
-                toml.dump(config, f)
+            self.installation_config_path.write_text(
+                tomli_w.dumps(config),
+                encoding="utf-8",
+            )
 
             return True
 
         except Exception as e:
-            import sys
             print(f"Error setting installation URL: {e}", file=sys.stderr)
             return False
 
@@ -84,12 +81,12 @@ class ConfigManager:
         Returns:
             str or None: Remote URL or None if not configured
         """
-        if toml is None or not self.installation_config_path.exists():
+        if not self.installation_config_path.exists():
             return None
 
         try:
-            with open(self.installation_config_path, 'r') as f:
-                config = toml.load(f)
+            with open(self.installation_config_path, "rb") as f:
+                config = tomllib.load(f)
             return config.get('url')
         except Exception:
             return None
@@ -146,10 +143,6 @@ class ConfigManager:
             tuple: (is_valid: bool, errors: List[str])
         """
         errors = []
-
-        # Check if toml library is available
-        if toml is None:
-            errors.append("toml library not installed (required for configuration files)")
 
         # Check user config syntax
         if self.user_config_path.exists():
@@ -241,11 +234,8 @@ class ConfigManager:
         Returns:
             dict or None: Parsed config or None if error
         """
-        if toml is None:
-            return None
-
         try:
-            with open(path, 'r') as f:
-                return toml.load(f)
+            with open(path, "rb") as f:
+                return tomllib.load(f)
         except Exception:
             return None

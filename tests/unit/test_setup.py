@@ -12,9 +12,16 @@ from unittest import mock
 
 import pytest
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
+    import tomli as tomllib  # type: ignore
+
 from ai_guardian.config_utils import get_config_dir
 from ai_guardian.setup import (
     IDESetup,
+    _render_codex_hooks_toml,
+    _render_codex_mcp_toml,
     setup_hooks,
     _create_vbs_wrapper,
     _is_ai_guardian_command,
@@ -929,6 +936,42 @@ class TestConfigDirEnvironmentVariable:
             assert checker.config is not None
 
 
+class TestConfigManagerTomlHandling:
+    """Test TOML read/write behavior for configuration manager."""
+
+    def test_installation_url_round_trip(self, tmp_path):
+        from ai_guardian.config_manager import ConfigManager
+
+        custom_dir = tmp_path / "config-dir"
+        custom_dir.mkdir()
+
+        with mock.patch.dict(os.environ, {"AI_GUARDIAN_CONFIG_DIR": str(custom_dir)}):
+            config_mgr = ConfigManager()
+            assert config_mgr.set_installation_url("https://example.com/config.toml") is True
+            assert config_mgr.get_installation_url() == "https://example.com/config.toml"
+
+        with open(custom_dir / "config.toml", "rb") as f:
+            saved = tomllib.load(f)
+        assert saved == {"url": "https://example.com/config.toml"}
+
+    def test_validate_configuration_accepts_valid_toml(self, tmp_path):
+        from ai_guardian.config_manager import ConfigManager
+
+        custom_dir = tmp_path / "config-dir"
+        custom_dir.mkdir()
+        (custom_dir / "allowed-tools.toml").write_text(
+            'remote_configs = ["https://example.com/policy.toml"]\n',
+            encoding="utf-8",
+        )
+
+        with mock.patch.dict(os.environ, {"AI_GUARDIAN_CONFIG_DIR": str(custom_dir)}):
+            config_mgr = ConfigManager()
+            is_valid, errors = config_mgr.validate_configuration()
+
+        assert is_valid is True
+        assert errors == []
+
+
 class TestCodexSetup:
     """Test cases for Codex IDE setup."""
 
@@ -1012,6 +1055,9 @@ timeout = 30
         assert "# BEGIN ai-guardian Codex hooks" in content
         assert "[[hooks.UserPromptSubmit]]" in content
         assert "[[hooks.PermissionRequest]]" in content
+        parsed = tomllib.loads(content)
+        assert parsed["hooks"]["PermissionRequest"][0]["hooks"][0]["type"] == "command"
+        assert parsed["hooks"]["PermissionRequest"][0]["hooks"][0]["timeout"] == 30
 
     def test_setup_codex_hooks_dry_run(self, tmp_path):
         setup = IDESetup()
@@ -1049,6 +1095,47 @@ timeout = 30
 
         assert success is False
         assert "already configured" in message
+
+    def test_render_codex_hooks_toml_handles_special_characters(self):
+        command = r'C:\Program Files\ai-guardian\hook.bat --flag "quoted"'
+        status_message = 'Scanning "now": C:\\temp\\project'
+        rendered = _render_codex_hooks_toml(
+            {
+                "PreToolUse": [
+                    {
+                        "matcher": ".*",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": command,
+                                "timeout": 30,
+                                "statusMessage": status_message,
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+
+        parsed = tomllib.loads(rendered)
+        hook = parsed["hooks"]["PreToolUse"][0]["hooks"][0]
+        assert hook["command"] == command
+        assert hook["statusMessage"] == status_message
+
+    def test_render_codex_mcp_toml_handles_special_characters(self):
+        command = r"C:\Users\me\AppData\Local\Programs\ai-guardian.exe"
+        args = [
+            "--serve",
+            r"C:\temp\agent workspace",
+            '--label="security:codex"',
+        ]
+
+        rendered = _render_codex_mcp_toml(command, args)
+
+        parsed = tomllib.loads(rendered)
+        server = parsed["mcp_servers"]["ai-guardian"]
+        assert server["command"] == command
+        assert server["args"] == args
 
 
 class TestGeminiSetup:
@@ -3228,7 +3315,7 @@ class TestWindowsSetup:
     def test_hooks_use_pythonw_on_windows(self, tmp_path, ide_type):
         """All agent adapters use pythonw.exe on Windows."""
         setup = IDESetup()
-        config_file = tmp_path / "settings.json"
+        config_file = tmp_path / ("config.toml" if ide_type == "codex" else "settings.json")
 
         with mock.patch.object(
             setup, "IDE_CONFIGS",
@@ -3243,8 +3330,12 @@ class TestWindowsSetup:
                         success, msg = setup.setup_ide_hooks(ide_type)
 
         assert success, msg
-        config = json.loads(config_file.read_text())
-        config_str = json.dumps(config)
+        if ide_type == "codex":
+            config = tomllib.loads(config_file.read_text())
+            config_str = json.dumps(config)
+        else:
+            config = json.loads(config_file.read_text())
+            config_str = json.dumps(config)
         assert "pythonw.exe -m ai_guardian" in config_str
 
     # -- Script-based hooks generate .bat on Windows --
