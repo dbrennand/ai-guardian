@@ -299,13 +299,44 @@ If the workflow fails, you may need to:
 - Delete the tag: `git tag -d v1.0.0 && git push origin :refs/tags/v1.0.0`
 - Increment the patch version and try again
 
-#### 8. Merge Back to Main and Bump Dev Version
+#### 8. Update Install URLs in README.md
+
+The `README.md` contains `curl` install commands that reference a specific git ref for `install.sh` and `install.ps1`. These URLs must point to the correct ref depending on the branch:
+
+- **Release branches** (`release-X.Y`): URLs point to the **release tag** (e.g., `v1.11.1`) so users install the exact released version
+- **Main branch**: URLs point to **`main`** since there is no PyPI release for the dev version — developers browsing main get the latest install script
+
+**On the release branch** (already done during the release):
+```bash
+# Replace all occurrences of the old version tag with the new one
+# e.g., v1.11.0 → v1.11.1
+sed -i '' 's/v1.0.0/v1.1.0/g' README.md  # macOS
+```
+
+**On main** (during merge-back):
+```bash
+# Ensure main's README points to main, not a version tag
+# This should already be the case if main was set up correctly
+grep 'raw.githubusercontent.com' README.md
+# Should show: .../main/install.sh and .../main/install.ps1
+```
+
+**Why this convention?**
+- Release branches serve stable users who want a known-good version
+- Main serves developers who want the latest code
+- There is no PyPI package for dev versions, so a version tag URL on main would be misleading
+
+#### 9. Merge Back to Main and Bump Dev Version
 
 ```bash
 # Switch to main
 git checkout main
 
-# Merge release branch
+# Cherry-pick CHANGELOG update (NOT full merge — avoids version conflicts)
+# For patch releases where main already has all the code changes:
+git cherry-pick <changelog-commit-sha>  # Or manually add the version section
+
+# For minor/major releases, merge the release branch:
 git merge release-1.0 --no-ff -m "Merge release-1.0 into main"
 
 # Bump version to next dev cycle in pyproject.toml
@@ -476,7 +507,7 @@ Use this checklist for each release:
 - [ ] Verify GitHub Actions workflow completes successfully
 - [ ] Verify package published to PyPI
 - [ ] Verify GitHub Release created
-- [ ] Test installation from PyPI: `pip install ai-guardian`
+- [ ] Test installation from PyPI: `uv tool install ai-guardian` (or `pip install ai-guardian`)
 
 ### Post-Release
 - [ ] Merge release branch back to `main`
@@ -798,11 +829,7 @@ pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://
 python -m twine upload dist/*
 ```
 
-**Note:** You'll need PyPI credentials configured in `~/.pypirc` or use environment variables:
-```bash
-export TWINE_USERNAME=__token__
-export TWINE_PASSWORD=pypi-YOUR_API_TOKEN
-```
+**Note:** You'll need PyPI credentials configured in `~/.pypirc` or via `TWINE_USERNAME` and `TWINE_PASSWORD` environment variables. See [PyPI publishing docs](https://packaging.python.org/en/latest/guides/publishing-package-distribution-releases-using-github-actions-ci-cd-workflows/) for details.
 
 ## References
 

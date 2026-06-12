@@ -101,6 +101,21 @@ class HookAdapter(ABC):
         """
         return {}
 
+    def get_default_transcript_paths(self) -> List[str]:
+        """Return default transcript file paths for this agent.
+
+        When the IDE does not provide a transcript_path in hook data,
+        the adapter can supply agent-specific default paths where
+        JSONL transcripts are stored.
+
+        Override in subclasses for agents with known transcript locations
+        (e.g., Copilot CLI, Codex). Returns only paths that exist on disk.
+
+        Returns:
+            List of absolute paths to JSONL transcript files, or empty list.
+        """
+        return []
+
     # -- Helpers available to all adapters --
 
     @staticmethod
@@ -239,6 +254,14 @@ class HookAdapter(ABC):
         event_name = hook_data.get("hook_event_name", "").lower()
         if not event_name:
             event_name = hook_data.get("hookName", "").lower()
+
+        # Session lifecycle events
+        if event_name in ("sessionend",):
+            return HookEvent.SESSION_END
+        if event_name in ("postcompact",):
+            return HookEvent.POST_COMPACT
+        if event_name in ("stop", "session.idle", "session.end"):
+            return HookEvent.STOP
 
         # OpenCode plugin events
         if event_name == "tool.execute.before":

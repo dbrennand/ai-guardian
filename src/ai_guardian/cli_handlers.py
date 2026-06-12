@@ -137,8 +137,9 @@ def _handle_violations_command(args):
                 print(location)
             else:
                 print(f"  Source: {source}")
+            from ai_guardian.secret_type_names import get_secret_type_display
             secret_type = blocked.get("secret_type", "Unknown")
-            print(f"  Secret type: {secret_type}")
+            print(f"  Secret type: {get_secret_type_display(secret_type)}")
 
         elif v.get("violation_type") in (ViolationType.PROMPT_INJECTION, ViolationType.JAILBREAK_DETECTED):
             source = blocked.get("source", "unknown")
@@ -346,6 +347,18 @@ def _handle_daemon_command(args):
                 else:
                     print(f"Project configs tracked: {project_count}")
 
+            # Per-directory pauses (#958)
+            paused_dirs = stats.get("paused_dirs", {})
+            if paused_dirs:
+                print(f"Paused directories: {len(paused_dirs)}")
+                for d, remaining in paused_dirs.items():
+                    if remaining > 0:
+                        mins = int(remaining // 60)
+                        secs = int(remaining % 60)
+                        print(f"  {d} ({mins}m {secs}s left)")
+                    else:
+                        print(f"  {d} (indefinite)")
+
             print(f"Active contexts: {stats.get('active_contexts', 0)}")
             print(f"Cached patterns: {stats.get('cached_patterns', 0)}")
         else:
@@ -382,8 +395,92 @@ def _handle_daemon_command(args):
             print("Failed to reload daemon config", file=sys.stderr)
             return 1
 
+    elif cmd == "pause":
+        from ai_guardian.daemon.client import is_daemon_running, send_pause_dir
+
+        if not is_daemon_running():
+            print("ai-guardian daemon is not running", file=sys.stderr)
+            return 1
+
+        directory = getattr(args, "dir", None)
+        minutes = getattr(args, "minutes", 0)
+
+        if directory:
+            directory = os.path.realpath(directory)
+            result = send_pause_dir(directory, minutes, timeout=_get_client_timeout())
+            if result and result.get("status") == "dir_paused":
+                dur = f" for {minutes} minutes" if minutes > 0 else " indefinitely"
+                print(f"ai-guardian daemon: scanning paused{dur} for {directory}")
+                return 0
+            else:
+                print("Failed to pause directory scanning", file=sys.stderr)
+                return 1
+        else:
+            # Global pause via existing socket protocol
+            from ai_guardian.daemon.protocol import encode_message, PROTOCOL_VERSION
+            from ai_guardian.daemon.client import _connect
+            from ai_guardian.daemon.protocol import decode_message
+            try:
+                sock = _connect(timeout=_get_client_timeout())
+                if sock is None:
+                    print("Failed to connect to daemon", file=sys.stderr)
+                    return 1
+                msg = {"version": PROTOCOL_VERSION, "type": "pause",
+                       "data": {"minutes": minutes}}
+                sock.sendall(encode_message(msg))
+                response = decode_message(sock, timeout=_get_client_timeout())
+                sock.close()
+                if response.get("type") == "response":
+                    dur = f" for {minutes} minutes" if minutes > 0 else " indefinitely"
+                    print(f"ai-guardian daemon: scanning paused{dur}")
+                    return 0
+            except Exception:
+                pass
+            print("Failed to pause daemon", file=sys.stderr)
+            return 1
+
+    elif cmd == "resume":
+        from ai_guardian.daemon.client import is_daemon_running, send_resume_dir
+
+        if not is_daemon_running():
+            print("ai-guardian daemon is not running", file=sys.stderr)
+            return 1
+
+        directory = getattr(args, "dir", None)
+
+        if directory:
+            directory = os.path.realpath(directory)
+            result = send_resume_dir(directory, timeout=_get_client_timeout())
+            if result and result.get("status") == "dir_resumed":
+                print(f"ai-guardian daemon: scanning resumed for {directory}")
+                return 0
+            else:
+                print("Failed to resume directory scanning", file=sys.stderr)
+                return 1
+        else:
+            # Global resume via existing socket protocol
+            from ai_guardian.daemon.protocol import encode_message, PROTOCOL_VERSION
+            from ai_guardian.daemon.client import _connect
+            from ai_guardian.daemon.protocol import decode_message
+            try:
+                sock = _connect(timeout=_get_client_timeout())
+                if sock is None:
+                    print("Failed to connect to daemon", file=sys.stderr)
+                    return 1
+                msg = {"version": PROTOCOL_VERSION, "type": "resume"}
+                sock.sendall(encode_message(msg))
+                response = decode_message(sock, timeout=_get_client_timeout())
+                sock.close()
+                if response.get("type") == "response":
+                    print("ai-guardian daemon: scanning resumed")
+                    return 0
+            except Exception:
+                pass
+            print("Failed to resume daemon", file=sys.stderr)
+            return 1
+
     else:
-        print("Usage: ai-guardian daemon {start|stop|status|restart|reload}")
+        print("Usage: ai-guardian daemon {start|stop|status|restart|reload|pause|resume}")
         return 1
 
 
@@ -518,11 +615,19 @@ def _handle_tray_start(args):
     from ai_guardian.daemon.multi_client import MultiDaemonClient
 
     if not is_tray_available():
-        print(
-            "System tray not available. "
-            "Install pystray and Pillow, or run 'ai-guardian doctor' for details.",
-            file=sys.stderr,
-        )
+        import platform
+        msg = "System tray not available."
+        if platform.system() == "Linux":
+            try:
+                import gi  # noqa: F401
+            except ImportError:
+                msg += (
+                    "\nGObject Introspection (gi) is not available in this Python environment."
+                    "\nThis is common with 'uv tool install' which creates an isolated env."
+                    "\nFix: reinstall with --venv: curl -fsSL .../install.sh | bash -s -- --venv"
+                )
+        msg += "\nRun 'ai-guardian doctor' for details."
+        print(msg, file=sys.stderr)
         return 1
 
     try:

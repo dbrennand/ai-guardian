@@ -130,6 +130,33 @@ class MultiDaemonClient:
         result = self._rest_request(target, "POST", "/api/resume")
         return result is not None
 
+    def send_pause_dir(
+        self, target: DaemonTarget, directory: str, minutes: int,
+    ) -> bool:
+        """Pause scanning for a specific directory."""
+        if target.runtime == "local":
+            return MultiDaemonClient._local_socket_send(
+                {"version": 1, "type": "pause_dir",
+                 "data": {"dir": directory, "minutes": minutes}}
+            )
+        result = self._rest_request(
+            target, "POST", "/api/pause_dir",
+            {"dir": directory, "minutes": minutes},
+        )
+        return result is not None
+
+    def send_resume_dir(self, target: DaemonTarget, directory: str) -> bool:
+        """Resume scanning for a specific directory."""
+        if target.runtime == "local":
+            return MultiDaemonClient._local_socket_send(
+                {"version": 1, "type": "resume_dir",
+                 "data": {"dir": directory}}
+            )
+        result = self._rest_request(
+            target, "POST", "/api/resume_dir", {"dir": directory},
+        )
+        return result is not None
+
     def send_stop(self, target: DaemonTarget) -> bool:
         """Stop daemon."""
         if target.runtime == "local":
@@ -142,6 +169,88 @@ class MultiDaemonClient:
         if target.runtime == "local":
             return self._local_restart()
         return self._send_daemon_command(target, "restart")
+
+    # --- Upgrade transport ---
+
+    def check_pip_available(self, target: DaemonTarget) -> bool:
+        """Check whether pip is available on the target."""
+        try:
+            if target.runtime == "local":
+                result = subprocess.run(
+                    ["python", "-m", "pip", "--version"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                return result.returncode == 0
+            cmd = ["pip", "--version"]
+            if target.runtime == "container":
+                return self._container_exec(target, cmd, timeout=10) is not None
+            if target.runtime == "kubernetes":
+                return self._kubectl_exec(target, cmd, timeout=10) is not None
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+        return False
+
+    @staticmethod
+    def check_pypi_version() -> Optional[str]:
+        """Fetch the latest ai-guardian version from PyPI."""
+        try:
+            url = "https://pypi.org/pypi/ai-guardian/json"
+            req = Request(url, headers={"Accept": "application/json"})
+            with urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode())
+                return data.get("info", {}).get("version")
+        except Exception:
+            return None
+
+    def run_pip_upgrade(
+        self, target: DaemonTarget, version: Optional[str] = None, timeout: int = 120
+    ) -> tuple:
+        """Sync daemon to a specific version or upgrade to latest.
+
+        Args:
+            target: The daemon target to upgrade
+            version: Specific version to install (e.g., "1.12.0"), or None for latest
+            timeout: Command timeout in seconds
+
+        Returns:
+            (success, output): Tuple of success boolean and command output
+        """
+        try:
+            # Build pip install command
+            if version:
+                pkg_spec = f"ai-guardian=={version}"
+            else:
+                pkg_spec = "ai-guardian"
+
+            if target.runtime == "local":
+                python_exe = shutil.which("python") or shutil.which("python3") or "python"
+                cmd = [python_exe, "-m", "pip", "install"]
+                if not version:
+                    cmd.append("--upgrade")
+                cmd.append(pkg_spec)
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True, text=True, timeout=timeout,
+                )
+                output = result.stdout + result.stderr
+                return (result.returncode == 0, output)
+
+            # Remote targets (container/kubernetes)
+            cmd = ["pip", "install"]
+            if not version:
+                cmd.append("--upgrade")
+            cmd.append(pkg_spec)
+            if target.runtime == "container":
+                out = self._container_exec(target, cmd, timeout=timeout)
+                return (out is not None, out or "")
+            if target.runtime == "kubernetes":
+                out = self._kubectl_exec(target, cmd, timeout=timeout)
+                return (out is not None, out or "")
+        except subprocess.TimeoutExpired:
+            return (False, "Version sync timed out")
+        except OSError as e:
+            return (False, str(e))
+        return (False, "Unsupported runtime")
 
     def _send_daemon_command(self, target: DaemonTarget, command: str) -> bool:
         """Send a daemon subcommand via exec to a remote target."""
@@ -505,7 +614,7 @@ class MultiDaemonClient:
 
     @staticmethod
     def _container_exec(
-        target: DaemonTarget, cmd: List[str]
+        target: DaemonTarget, cmd: List[str], timeout: int = 30
     ) -> Optional[str]:
         """Execute command inside container (non-interactive)."""
         import re
@@ -516,7 +625,7 @@ class MultiDaemonClient:
         full_cmd = [engine, "exec", target.container_id] + cmd
         try:
             result = subprocess.run(
-                full_cmd, capture_output=True, text=True, timeout=30
+                full_cmd, capture_output=True, text=True, timeout=timeout
             )
             if result.returncode != 0:
                 logger.debug("Container exec failed: %s", result.stderr)
@@ -544,7 +653,7 @@ class MultiDaemonClient:
 
     @staticmethod
     def _kubectl_exec(
-        target: DaemonTarget, cmd: List[str]
+        target: DaemonTarget, cmd: List[str], timeout: int = 30
     ) -> Optional[str]:
         """Execute command inside K8s pod (non-interactive)."""
         full_cmd = [
@@ -554,7 +663,7 @@ class MultiDaemonClient:
         ] + cmd
         try:
             result = subprocess.run(
-                full_cmd, capture_output=True, text=True, timeout=30
+                full_cmd, capture_output=True, text=True, timeout=timeout
             )
             if result.returncode != 0:
                 logger.debug("kubectl exec failed: %s", result.stderr)

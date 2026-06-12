@@ -21,9 +21,11 @@ BUNDLED_FILES = {
     "secrets": DATA_DIR / "secrets.toml",
     "pii": DATA_DIR / "pii.toml",
     "prompt_injection": DATA_DIR / "prompt-injection.toml",
+    "context_poisoning": DATA_DIR / "context-poisoning.toml",
     "unicode": DATA_DIR / "unicode.toml",
     "config_exfil": DATA_DIR / "config-exfil.toml",
     "ssrf": DATA_DIR / "ssrf.toml",
+    "supply_chain": DATA_DIR / "supply-chain.toml",
 }
 
 import logging

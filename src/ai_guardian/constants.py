@@ -30,6 +30,8 @@ class ViolationType(str, Enum):
     PII_IN_TRANSCRIPT = "pii_in_transcript"
     IMAGE_SECRET_DETECTED = "image_secret_detected"
     IMAGE_PII_DETECTED = "image_pii_detected"
+    CONTEXT_POISONING = "context_poisoning"
+    SUPPLY_CHAIN = "supply_chain"
 
 
 class HookEvent(str, Enum):
@@ -39,6 +41,9 @@ class HookEvent(str, Enum):
     POST_TOOL_USE = "posttooluse"
     BEFORE_READ_FILE = "beforereadfile"
     PERMISSION_REQUEST = "permissionrequest"
+    STOP = "stop"
+    SESSION_END = "sessionend"
+    POST_COMPACT = "postcompact"
 
 
 AUGMENT_TOOL_MAP = {

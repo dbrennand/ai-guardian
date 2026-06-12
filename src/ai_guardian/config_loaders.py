@@ -409,6 +409,35 @@ def _load_image_scanning_config():
     return _load_config_section("image_scanning", defaults=_IMAGE_SCANNING_DEFAULTS, merge_ignore=True)
 
 
+_CONTEXT_POISONING_DEFAULTS = {
+    'enabled': True,
+    'action': 'warn',
+    'allowlist_patterns': [],
+    'custom_patterns': [],
+    'sensitivity': 'medium',
+}
+
+
+def _load_context_poisoning_config():
+    """Load context poisoning configuration. Returns defaults when section is absent."""
+    return _load_config_section("context_poisoning", defaults=_CONTEXT_POISONING_DEFAULTS)
+
+
+_SUPPLY_CHAIN_DEFAULTS = {
+    'enabled': True,
+    'action': 'block',
+    'scan_hooks': True,
+    'scan_mcp_configs': True,
+    'scan_plugins': True,
+    'allowlist_paths': [],
+}
+
+
+def _load_supply_chain_config():
+    """Load supply chain scanning configuration. Returns defaults when section is absent."""
+    return _load_config_section("supply_chain", defaults=_SUPPLY_CHAIN_DEFAULTS)
+
+
 def _load_security_instructions_config():
     """Load security instructions configuration from ai-guardian.json."""
     return _load_config_section("security_instructions")

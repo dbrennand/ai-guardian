@@ -74,6 +74,9 @@ class TestHookEvent:
             "posttooluse",
             "beforereadfile",
             "permissionrequest",
+            "stop",
+            "sessionend",
+            "postcompact",
         }
 
     def test_usable_in_tuple_membership(self):

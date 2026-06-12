@@ -36,8 +36,13 @@ See [Security Design](https://github.com/itdove/ai-guardian/blob/main/docs/SECUR
 **One-line install** (creates config, installs scanner, sets up hooks):
 
 ```bash
-# Linux / macOS
+# Linux / macOS (auto-detects uv → venv → pip)
 curl -fsSL https://raw.githubusercontent.com/itdove/ai-guardian/main/install.sh | bash -s -- --ide claude
+
+# Force a specific install method
+curl -fsSL https://raw.githubusercontent.com/itdove/ai-guardian/main/install.sh | bash -s -- --uv --ide claude    # uv tool install (fastest)
+curl -fsSL https://raw.githubusercontent.com/itdove/ai-guardian/main/install.sh | bash -s -- --venv --ide claude  # venv + pip
+curl -fsSL https://raw.githubusercontent.com/itdove/ai-guardian/main/install.sh | bash -s -- --pip --ide claude   # bare pip
 
 # Windows (PowerShell)
 irm https://raw.githubusercontent.com/itdove/ai-guardian/main/install.ps1 | iex
@@ -46,7 +51,8 @@ irm https://raw.githubusercontent.com/itdove/ai-guardian/main/install.ps1 | iex
 Or install manually:
 
 ```bash
-pip install ai-guardian
+uv tool install ai-guardian                # recommended
+pip install ai-guardian                    # alternative
 ai-guardian setup --ide claude --create-config --install-scanner
 ```
 
@@ -116,6 +122,11 @@ ai-guardian setup --ide claude --create-config --profile @strict --install-scann
 | Tray Plugins | Custom menu items with native tkinter popup forms (Textual terminal fallback), platform-aware commands | [docs/MULTI_DAEMON_TRAY.md](https://github.com/itdove/ai-guardian/blob/main/docs/MULTI_DAEMON_TRAY.md#tray-plugins) |
 | TOML Pattern Engine | Built-in Python scanner with 267 pre-compiled patterns, no binary required | [docs/TOML_PATTERNS.md](https://github.com/itdove/ai-guardian/blob/main/docs/TOML_PATTERNS.md) |
 | Multi-Agent Support | Hook adapters for 12 AI coding agents with normalized input/output | [docs/AGENT_SUPPORT.md](https://github.com/itdove/ai-guardian/blob/main/docs/AGENT_SUPPORT.md) |
+| Supply Chain Scanning | Detect malicious patterns in agent hooks, MCP configs, and plugin files | [docs/CONFIGURATION.md](https://github.com/itdove/ai-guardian/blob/main/docs/CONFIGURATION.md#supply-chain-scanning) |
+| Context Poisoning Detection | Detect persistent instruction injection in conversation context (OWASP LLM03) | [docs/security/CONTEXT_POISONING.md](https://github.com/itdove/ai-guardian/blob/main/docs/security/CONTEXT_POISONING.md) |
+| Security SDK & REST API | Programmatic security checking for Python agents and multi-language support | [docs/SDK.md](https://github.com/itdove/ai-guardian/blob/main/docs/SDK.md) |
+| Secret Liveness Validation | Verify detected secrets are still active via provider APIs | [docs/CONFIGURATION.md](https://github.com/itdove/ai-guardian/blob/main/docs/CONFIGURATION.md#secret-liveness-validation) |
+| Hook Latency Metrics | Per-hook timing with console dashboard for performance analysis | [docs/HOOKS.md](https://github.com/itdove/ai-guardian/blob/main/docs/HOOKS.md#hook-latency-tracking) |
 
 ## Default Behavior (No Configuration File)
 
@@ -245,38 +256,69 @@ See [docs/SCANNER_INSTALLATION.md](https://github.com/itdove/ai-guardian/blob/ma
 
 ## Installation
 
+**Linux / macOS:**
+
 ```bash
-pip install ai-guardian                   # Stable release from PyPI
-pip install ai-guardian[skill-discovery]  # With auto-discovery from GitHub/GitLab
+# Recommended: uv tool install (isolated, binary in PATH, no activation needed)
+uv tool install ai-guardian
+
+# Alternative: pip install
+pip install ai-guardian
+
+# Alternative: venv + pip
+python -m venv ~/.ai-guardian-venv
+~/.ai-guardian-venv/bin/pip install ai-guardian
+
 # Optional: tkinter for native tray plugin popup dialogs (see docs/MULTI_DAEMON_TRAY.md)
 # RHEL/Fedora: dnf install python3-tkinter | Debian: apt install python3-tk
 # macOS: included with system Python; pyenv users need tcl-tk (brew install tcl-tk)
+# uv: tkinter unavailable — NiceGUI browser form used automatically as fallback
 ```
 
-> **Warning:** The `main` branch contains unreleased development code. Always install stable releases from PyPI (`pip install ai-guardian`). Do not `git clone` + `pip install -e .` for production use — development builds may contain breaking changes, incomplete features, or experimental code that has not been release-tested.
+**Windows (PowerShell):**
+
+```powershell
+# Recommended: uv tool install
+uv tool install ai-guardian
+
+# Alternative: pip install
+pip install ai-guardian
+
+# Alternative: venv + pip
+python -m venv $env:USERPROFILE\.ai-guardian-venv
+& "$env:USERPROFILE\.ai-guardian-venv\Scripts\pip" install ai-guardian
+
+# Or use the one-line installer:
+irm https://raw.githubusercontent.com/itdove/ai-guardian/main/install.ps1 | iex
+```
+
+> **Warning:** The `main` branch contains unreleased development code. Always install stable releases from PyPI (`uv tool install ai-guardian` or `pip install ai-guardian`). Do not `git clone` + `pip install -e .` for production use — development builds may contain breaking changes, incomplete features, or experimental code that has not been release-tested.
 
 For development and contributing:
 
 ```bash
 git clone https://github.com/itdove/ai-guardian.git
-cd ai-guardian && pip install -e .
+cd ai-guardian && uv pip install -e .      # recommended
+# or: pip install -e .
 ```
 
 > **Dev builds:** CI builds a wheel on every PR and merge. Download from the [Actions tab](https://github.com/itdove/ai-guardian/actions/workflows/build-wheel.yml) for testing only; use PyPI for stable releases.
 
 ## Testing
 
-```bash
-pip install ai-guardian[dev]                     # Install test dependencies
-pytest                                          # Run all tests
-pytest --cov=ai_guardian --cov-report=term      # With coverage
-```
-
-Or using [uv](https://docs.astral.sh/uv/):
+Using [uv](https://docs.astral.sh/uv/) (recommended):
 
 ```bash
 uv run --extra dev python -m pytest             # Run all tests
 uv run --extra dev python -m pytest --cov=ai_guardian --cov-report=term  # With coverage
+```
+
+Or using pip:
+
+```bash
+pip install ai-guardian[dev]                     # Install test dependencies
+pytest                                          # Run all tests
+pytest --cov=ai_guardian --cov-report=term      # With coverage
 ```
 
 See [AGENTS.md](https://github.com/itdove/ai-guardian/blob/main/AGENTS.md) for testing guidelines and CI/CD details.

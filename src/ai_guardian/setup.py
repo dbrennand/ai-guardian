@@ -36,15 +36,12 @@ def _resolve_binary_path() -> str:
     window flash on every hook invocation (see issue #902).
     """
     if platform.system() == "Windows":
-        pythonw = Path(sys.executable).parent / "pythonw.exe"
-        if pythonw.exists():
+        pythonw = shutil.which("pythonw")
+        if pythonw:
             return f"{pythonw} -m ai_guardian"
     path = shutil.which("ai-guardian")
     if path:
         return path
-    candidate = Path(sys.executable).parent / "ai-guardian"
-    if candidate.exists():
-        return str(candidate)
     return "ai-guardian"
 
 
@@ -267,6 +264,26 @@ class IDESetup:
                                 "type": "command",
                                 "command": "ai-guardian",
                                 "statusMessage": "🛡️ Scanning tool output..."
+                            }
+                        ]
+                    }
+                ],
+                "SessionEnd": [
+                    {
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "ai-guardian"
+                            }
+                        ]
+                    }
+                ],
+                "PostCompact": [
+                    {
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "ai-guardian"
                             }
                         ]
                     }
@@ -852,8 +869,9 @@ class IDESetup:
             if "hooks" not in existing_config:
                 existing_config["hooks"] = {}
 
-            # Merge UserPromptSubmit, PreToolUse, and PostToolUse hooks
-            for hook_name in ["UserPromptSubmit", "PreToolUse", "PostToolUse"]:
+            # Merge UserPromptSubmit, PreToolUse, PostToolUse, SessionEnd, PostCompact hooks
+            for hook_name in ["UserPromptSubmit", "PreToolUse", "PostToolUse",
+                              "SessionEnd", "PostCompact"]:
                 if hook_name not in ai_guardian_hooks:
                     continue
 
@@ -1292,7 +1310,6 @@ class IDESetup:
 
         return True, message
 
-    @staticmethod
     @staticmethod
     def _strip_jsonc_comments(text: str) -> str:
         """Strip single-line (//) and multi-line (/* */) comments from JSONC.
@@ -1960,7 +1977,11 @@ def _get_default_config_template(permissive: bool = False) -> Dict:
             "_comment_incremental": "Incremental scanning: only scan files whose content changed (v1.7.0+, requires cache_results)",
             "incremental": False,
             "_comment_audit": "Audit logging: log all scan operations for compliance (v1.7.0+)",
-            "audit_logging": False
+            "audit_logging": False,
+            "_comment_validate_secrets": "Secret liveness validation: check if detected secrets are still active (v1.11.0+). PRIVACY: sends secrets to provider APIs. Requires explicit opt-in.",
+            "validate_secrets": False,
+            "validation_timeout_ms": 3000,
+            "on_inactive": "warn"
         },
 
         "_comment_prompt_injection": "Detect and block prompt injection attacks that try to manipulate AI behavior",
@@ -2040,6 +2061,16 @@ def _get_default_config_template(permissive: bool = False) -> Dict:
             "additional_files": [],
             "ignore_files": [],
             "additional_patterns": []
+        },
+
+        "_comment_supply_chain": "Detect malicious patterns in agent config files — hooks, MCP servers, and plugin files (NEW in v1.11.0, Issue #1055)",
+        "supply_chain": {
+            "enabled": True,
+            "action": "block",
+            "scan_hooks": True,
+            "scan_mcp_configs": True,
+            "scan_plugins": True,
+            "allowlist_paths": [],
         },
 
         "_comment_permissions": "Control which tools (Skills, MCP servers, Bash, etc.) are allowed to run. Rules evaluated in order, last match wins.",
@@ -2141,12 +2172,19 @@ def _get_default_config_template(permissive: bool = False) -> Dict:
             "block_end": [],
         },
 
+        "_comment_latency_tracking": "Hook latency tracking — records per-hook timing to latency.jsonl for performance analysis. Disabled by default. (NEW in v1.11.0, Issue #1057)",
+        "latency_tracking": {
+            "enabled": False,
+            "max_entries": 5000,
+            "retention_days": 30
+        },
+
         "_comment_violation_logging": "Log blocked operations for audit and review (NEW in v1.1.0)",
         "violation_logging": {
             "enabled": True,
             "max_entries": 1000,
             "retention_days": 30,
-            "log_types": ["tool_permission", "directory_blocking", "secret_detected", "secret_redaction", "prompt_injection", "jailbreak_detected", "ssrf_blocked", "config_file_exfil", "pii_detected", "secret_in_transcript", "pii_in_transcript", "prompt_injection_in_transcript", "annotation_suppressed", "image_secret_detected", "image_pii_detected"]
+            "log_types": ["tool_permission", "directory_blocking", "secret_detected", "secret_redaction", "prompt_injection", "jailbreak_detected", "ssrf_blocked", "config_file_exfil", "pii_detected", "secret_in_transcript", "pii_in_transcript", "prompt_injection_in_transcript", "annotation_suppressed", "image_secret_detected", "image_pii_detected", "supply_chain"]
         },
         "_comment_daemon": "Background daemon for faster hook processing. Auto-starts on any command, falls back to direct if unavailable.",
         "daemon": {
@@ -2171,12 +2209,25 @@ def _get_default_config_template(permissive: bool = False) -> Dict:
             "proactive_level": "low",
         },
 
-        "_comment_support": "Support bundle export. Two-step process: prepare (sanitize + review) then send (with user approval). Destination: local path, S3 URI, or GCS URI (gs://bucket-name/). (NEW in v1.7.0, Issue #477)",
+        "_comment_support": "Support bundle export. Two-step process: prepare (sanitize + review) then send (with user approval). Destination: local path, S3 URI, GCS URI (gs://bucket-name/), or email (mailto:support@company.com). (NEW in v1.7.0, Issue #477; email: Issue #932)",
         "support": {
             "export_destination": "",
             "auth": {
                 "method": "none",
                 "token_env": "",
+            },
+            "_comment_email": "SMTP email settings for mailto: destinations. Zero new dependencies (Python stdlib only).",
+            "email": {
+                "smtp_host": "",
+                "smtp_port": 587,
+                "smtp_tls": True,
+                "from": "",
+                "subject_prefix": "[AI Guardian Support]",
+                "auth": {
+                    "method": "none",
+                    "username_env": "",
+                    "password_env": "",
+                },
             },
             "bundle_ttl_minutes": 30,
         },
@@ -3550,6 +3601,10 @@ export const AiGuardian: Plugin = async (ctx) => {
         } catch {}
       }
     },
+
+    async 'session.end'() {
+      runGuardian({ hook_event_name: 'session.end', opencode_version: '1.0.0', hook_source: 'opencode', cwd });
+    },
   };
 };
 """
@@ -3641,7 +3696,7 @@ export default definePluginEntry({
     });
 
     api.on('session_end', async () => {
-      // no-op: allow ai-guardian to log session end
+      runGuardian({ hook_event_name: 'session.end', hook_source: 'openclaw' });
     });
   },
 });

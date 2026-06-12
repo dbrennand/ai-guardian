@@ -112,12 +112,15 @@ class Doctor:
             self.check_directory_rules,
             self.check_console_deps,
             self.check_tray_support,
+            self.check_tkinter_support,
             self.check_terminal_emulator,
             self.check_config_consistency,
             self.check_tighten_only,
             self.check_self_protection,
             self.check_image_scanning,
             self.check_tray_plugins,
+            self.check_email_auth,
+            self.check_ml_detection,
         ]
         for check_fn in checks:
             try:
@@ -544,8 +547,7 @@ class Doctor:
             return CheckResult(
                 name="ps_url",
                 status=CheckStatus.FAIL,
-                message="requests library not installed",
-                fix_hint="pip install requests",
+                message="requests library not available",
             )
 
         headers = {"User-Agent": "ai-guardian/doctor"}
@@ -661,10 +663,8 @@ class Doctor:
                 )
             return CheckResult(
                 name="ps_cache_freshness",
-                status=CheckStatus.WARN,
-                message="No cached patterns",
-                fix_hint="Run: ai-guardian doctor --fix",
-                fixable=True,
+                status=CheckStatus.PASS,
+                message="No cached patterns yet (fetched on first scan)",
             )
 
         age_seconds = time.time() - cache_file.stat().st_mtime
@@ -1105,11 +1105,15 @@ class Doctor:
             missing.append("tree-sitter-json")
 
         if missing:
+            ts_missing = [m for m in missing if m.startswith("tree-sitter")]
+            if ts_missing and sys.version_info < (3, 10):
+                hint = "AST scanning requires Python >= 3.10"
+            else:
+                hint = f"Not available: {', '.join(missing)}"
             return CheckResult(
                 name="console_deps",
                 status=CheckStatus.WARN,
-                message=f"Missing: {', '.join(missing)}",
-                fix_hint=f"pip install {' '.join(missing)}",
+                message=hint,
             )
 
         return CheckResult(
@@ -1183,8 +1187,7 @@ class Doctor:
                 return CheckResult(
                     name="tray_support",
                     status=CheckStatus.WARN,
-                    message="pystray not installed — tray icon unavailable",
-                    fix_hint="pip install pystray Pillow",
+                    message="pystray not available — tray icon unavailable",
                 )
 
         if system != "Linux":
@@ -1192,6 +1195,28 @@ class Doctor:
                 name="tray_support",
                 status=CheckStatus.SKIP,
                 message=f"Unsupported platform ({system})",
+            )
+
+        # Linux: check GObject Introspection (gi) availability
+        try:
+            import gi  # noqa: F401
+        except ImportError:
+            return CheckResult(
+                name="tray_support",
+                status=CheckStatus.WARN,
+                message=(
+                    "GObject Introspection (gi) not available — "
+                    "tray requires it on Linux"
+                ),
+                fix_hint=(
+                    "Reinstall with --venv: install.sh --venv\n"
+                    "Or install PyGObject: pip install PyGObject\n"
+                    "System headers may be needed first:\n"
+                    "  Fedora/RHEL: sudo dnf install gobject-introspection-devel "
+                    "cairo-gobject-devel pkg-config python3-devel gcc\n"
+                    "  Debian/Ubuntu: sudo apt install libgirepository1.0-dev "
+                    "gcc libcairo2-dev pkg-config python3-dev"
+                ),
             )
 
         # Linux: check GNOME AppIndicator
@@ -1237,6 +1262,50 @@ class Doctor:
                 "log out/in, then: gnome-extensions enable "
                 "appindicatorsupport@rgcjonas.gmail.com"
             ),
+        )
+
+    def check_tkinter_support(self) -> CheckResult:
+        """Check if tkinter is available for native tray plugin popups."""
+        if os.environ.get("AI_GUARDIAN_NO_TKINTER"):
+            return CheckResult(
+                name="tkinter_support",
+                status=CheckStatus.SKIP,
+                message="Disabled via AI_GUARDIAN_NO_TKINTER",
+            )
+
+        try:
+            import tkinter  # noqa: F401
+        except ImportError:
+            try:
+                import nicegui  # noqa: F401
+                return CheckResult(
+                    name="tkinter_support",
+                    status=CheckStatus.PASS,
+                    message="tkinter unavailable — NiceGUI fallback active",
+                )
+            except ImportError:
+                return CheckResult(
+                    name="tkinter_support",
+                    status=CheckStatus.WARN,
+                    message="tkinter unavailable — popups use Textual terminal fallback",
+                    fix_hint=(
+                        "Install tkinter for native popups: "
+                        "brew install tcl-tk (macOS/pyenv), "
+                        "dnf install python3-tkinter (RHEL), "
+                        "apt install python3-tk (Debian)"
+                    ),
+                )
+
+        try:
+            import nicegui  # noqa: F401
+            fallback = "NiceGUI"
+        except ImportError:
+            fallback = "Textual"
+
+        return CheckResult(
+            name="tkinter_support",
+            status=CheckStatus.PASS,
+            message=f"tkinter available (fallback: {fallback})",
         )
 
     def check_terminal_emulator(self) -> CheckResult:
@@ -1298,7 +1367,7 @@ class Doctor:
         )
 
     def check_self_protection(self) -> CheckResult:
-        """Verify immutable patterns protect config/state/cache from agent Read access."""
+        """Verify immutable patterns protect config/state/cache from agent access."""
         from ai_guardian.tool_policy import IMMUTABLE_DENY_PATTERNS
 
         issues = []
@@ -1323,25 +1392,35 @@ class Doctor:
             if required not in bash_patterns:
                 issues.append(f"Missing Bash pattern: {required}")
 
+        for required in [
+            "*ai-guardian*pause*",
+            "*ai-guardian*resume*",
+            "*ai-guardian*stop*",
+            "*ai-guardian*disable*",
+            "*ai-guardian*uninstall*",
+        ]:
+            if required not in bash_patterns:
+                issues.append(f"Missing Bash CLI pattern: {required}")
+
         if issues:
             return CheckResult(
                 name="self_protection",
                 status=CheckStatus.FAIL,
-                message=f"{len(issues)} gap(s) in agent read protection",
+                message=f"{len(issues)} gap(s) in agent protection",
                 detail="\n".join(f"  - {i}" for i in issues),
             )
 
         return CheckResult(
             name="self_protection",
             status=CheckStatus.PASS,
-            message="Config, state, cache read-protected from agent",
+            message="Config, state, cache, CLI read-protected from agent",
         )
 
     def check_image_scanning(self) -> CheckResult:
         """Check OCR engine availability when image scanning is enabled."""
         self._ensure_config()
         img_config = (self._config or {}).get("image_scanning", {})
-        if not img_config or not img_config.get("enabled", True):
+        if not img_config.get("enabled", True):
             return CheckResult(
                 name="image_scanning",
                 status=CheckStatus.SKIP,
@@ -1366,9 +1445,68 @@ class Doctor:
             return CheckResult(
                 name="image_scanning",
                 status=CheckStatus.FAIL,
-                message="rapidocr-onnxruntime not installed (required for image scanning)",
-                fix_hint="pip install rapidocr-onnxruntime",
+                message="rapidocr-onnxruntime not available (required for image scanning)",
             )
+
+    def check_ml_detection(self) -> CheckResult:
+        """Check ML prompt injection model availability."""
+        self._ensure_config()
+        pi_config = (self._config or {}).get("prompt_injection", {})
+        detector = pi_config.get("detector", "heuristic")
+
+        if detector not in ("ml", "hybrid"):
+            return CheckResult(
+                name="ml_detection",
+                status=CheckStatus.SKIP,
+                message=f"ML detection not configured (detector='{detector}')",
+            )
+
+        try:
+            from ai_guardian.ml_detection import is_ml_available, verify_model
+        except ImportError:
+            return CheckResult(
+                name="ml_detection",
+                status=CheckStatus.FAIL,
+                message="ML detection module not found",
+            )
+
+        if not is_ml_available():
+            return CheckResult(
+                name="ml_detection",
+                status=CheckStatus.FAIL,
+                message="ML dependencies not available (onnxruntime required)",
+            )
+
+        engines_config = pi_config.get("ml_engines", [])
+        if not engines_config:
+            return CheckResult(
+                name="ml_detection",
+                status=CheckStatus.WARN,
+                message="detector is 'ml'/'hybrid' but no ml_engines configured",
+                fix_hint="Add ml_engines to prompt_injection config in ai-guardian.json",
+            )
+
+        errors = []
+        for eng in engines_config:
+            model = eng.get("model", "")
+            if model:
+                is_valid, msg = verify_model(model)
+                if not is_valid:
+                    errors.append(f"{model}: {msg}")
+
+        if errors:
+            return CheckResult(
+                name="ml_detection",
+                status=CheckStatus.FAIL,
+                message=f"ML model issues: {'; '.join(errors)}",
+                fix_hint="ai-guardian ml download",
+            )
+
+        return CheckResult(
+            name="ml_detection",
+            status=CheckStatus.PASS,
+            message=f"ML detection ready ({len(engines_config)} engine(s), strategy={pi_config.get('ml_strategy', 'any-match')})",
+        )
 
     def check_tray_plugins(self) -> CheckResult:
         """Check tray plugin files for validity and circular imports."""
@@ -1404,6 +1542,49 @@ class Doctor:
             name="tray_plugins",
             status=CheckStatus.PASS,
             message=f"{len(json_files)} plugin file(s) OK",
+        )
+
+    def check_email_auth(self) -> CheckResult:
+        """Warn if SMTP credentials are hardcoded in config (inline auth)."""
+        self._ensure_config()
+        if not self._config:
+            return CheckResult(
+                name="email_auth",
+                status=CheckStatus.SKIP,
+                message="No config loaded",
+            )
+
+        support = self._config.get("support", {})
+        email = support.get("email", {})
+        auth = email.get("auth", {})
+        method = auth.get("method", "none")
+
+        if method == "inline":
+            return CheckResult(
+                name="email_auth",
+                status=CheckStatus.WARN,
+                message=(
+                    "SMTP credentials are hardcoded in config (auth.method=inline). "
+                    "Use env var auth (method=env) for better security."
+                ),
+            )
+
+        destination = support.get("export_destination", "")
+        if destination.startswith("mailto:") or "@" in destination:
+            if not email.get("smtp_host"):
+                return CheckResult(
+                    name="email_auth",
+                    status=CheckStatus.WARN,
+                    message=(
+                        "Email destination configured but no SMTP host set. "
+                        "Bundle will use system mailto: fallback."
+                    ),
+                )
+
+        return CheckResult(
+            name="email_auth",
+            status=CheckStatus.PASS,
+            message="Email auth OK",
         )
 
 
@@ -1449,6 +1630,7 @@ _CHECK_DISPLAY_NAMES = {
     "self_protection": "Self-protection",
     "image_scanning": "Image scanning",
     "tray_plugins": "Tray plugins",
+    "email_auth": "Email auth",
 }
 
 

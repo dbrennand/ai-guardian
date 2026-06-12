@@ -39,6 +39,41 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# Markers that indicate pasted stack traces or tool output in user prompts.
+# When 2+ markers are present, code-identifier patterns (e.g. __init__) are
+# suppressed to avoid false positives on legitimate developer output.
+# Sources: Fluent Bit multiline filter, Promtail, OpenTelemetry Filelog.
+_TOOL_OUTPUT_MARKERS = [
+    "Traceback (most recent call last)",
+    "== test session starts ==",
+    "panic:",
+    "goroutine ",
+    "panicked at",
+    "npm ERR!",
+    "cargo error",
+    "make: ***",
+    "FAILED ",
+    " ERRORS ",
+    "collected ",
+]
+
+# Critical patterns that match code identifiers and should be suppressed
+# when the prompt contains tool output (stack traces, test results, etc.).
+_CODE_IDENTIFIER_PATTERNS = frozenset([
+    r'__(?:class|mro|subclasses|init|globals|builtins|import)__',
+])
+
+
+def _looks_like_tool_output(text: str) -> bool:
+    """Detect pasted stack traces or tool output in prompt text."""
+    count = sum(1 for m in _TOOL_OUTPUT_MARKERS if m in text)
+    return count >= 2
+
+
+def _offset_to_line_number(text: str, offset: int) -> int:
+    """Convert a character offset to a 1-based line number."""
+    return text[:offset].count('\n') + 1
+
 
 class UnicodeAttackDetector:
     """
@@ -777,6 +812,15 @@ class PromptInjectionDetector:
         self.ignore_tools = self.config.get("ignore_tools", [])
         self.action = self.config.get("action", "block")
 
+        # ML engine config (#185)
+        self.ml_engines = self.config.get("ml_engines", [])
+        self.ml_strategy = self.config.get("ml_strategy", "any-match")
+        self.fallback_on_error = self.config.get("fallback_on_error", "heuristic")
+
+        # ML result tracking
+        self.last_ml_results = []
+        self.last_ml_strategy = ""
+
         # Load patterns from bundled TOML (primary source, fallback to class attributes)
         toml_patterns = self._load_patterns_from_toml()
 
@@ -821,6 +865,7 @@ class PromptInjectionDetector:
         self.last_matched_pattern = None
         self.last_matched_text = None
         self.last_confidence = None
+        self.last_line_number = None
 
         # Initialize Unicode attack detector
         unicode_config = self.config.get("unicode_detection", {})
@@ -983,7 +1028,7 @@ class PromptInjectionDetector:
 
         return False
 
-    def _heuristic_detection(self, content: str, source_type: str = "user_prompt") -> Tuple[bool, float, str, str, str]:
+    def _heuristic_detection(self, content: str, source_type: str = "user_prompt") -> Tuple[bool, float, str, str, str, Optional[int]]:
         """
         Perform heuristic/pattern-based detection.
 
@@ -992,19 +1037,31 @@ class PromptInjectionDetector:
             source_type: Source of content - "user_prompt" or "file_content"
 
         Returns:
-            Tuple of (is_injection, confidence_score, matched_text, matched_pattern, attack_type)
+            Tuple of (is_injection, confidence_score, matched_text, matched_pattern, attack_type, line_number)
             attack_type is "injection" or "jailbreak"
+            line_number is 1-based line where the match starts, or None
         """
-        # Track matches with their attack type: (confidence, text, pattern, attack_type)
+        # Track matches with their attack type: (confidence, text, pattern, attack_type, offset)
         matches = []
 
         # For file content, only check critical patterns with higher threshold
         # For user prompts, check all patterns
+        critical_patterns = self._compiled_critical
+
+        # Suppress code-identifier patterns when prompt contains tool output
+        # (stack traces, test results, build errors) to avoid FP on __init__ etc.
+        if source_type == "user_prompt" and _looks_like_tool_output(content):
+            critical_patterns = [
+                p for p in self._compiled_critical
+                if p.pattern not in _CODE_IDENTIFIER_PATTERNS
+            ]
+            logger.debug("Tool output detected in prompt — suppressing code-identifier patterns")
+
         if source_type == "file_content":
-            pattern_sets = [("high", self._compiled_critical, "injection")]
+            pattern_sets = [("high", critical_patterns, "injection")]
         else:
             pattern_sets = [
-                ("high", self._compiled_critical, "injection"),
+                ("high", critical_patterns, "injection"),
                 ("high", self._compiled_documentation, "injection"),
                 ("high", self._compiled_jailbreak, "jailbreak"),
             ]
@@ -1014,30 +1071,30 @@ class PromptInjectionDetector:
             for pattern in pattern_list:
                 match = pattern.search(content)
                 if match:
-                    matches.append((confidence_level, match.group(0), pattern.pattern, attack_type))
+                    matches.append((confidence_level, match.group(0), pattern.pattern, attack_type, match.start()))
 
         # Check user-defined jailbreak patterns (user prompts only, high confidence)
         if source_type == "user_prompt":
             for pattern in self._compiled_user_jailbreak:
                 match = pattern.search(content)
                 if match:
-                    matches.append(("high", match.group(0), pattern.pattern, "jailbreak"))
+                    matches.append(("high", match.group(0), pattern.pattern, "jailbreak", match.start()))
 
         # Check custom patterns (treat as high confidence, check for all sources)
         for pattern in self._compiled_custom:
             match = pattern.search(content)
             if match:
-                matches.append(("high", match.group(0), pattern.pattern, "injection"))
+                matches.append(("high", match.group(0), pattern.pattern, "injection", match.start()))
 
         # Check suspicious patterns (lower confidence) - only for user prompts
         if source_type == "user_prompt" and self.sensitivity in ["medium", "high"]:
             for pattern in self._compiled_suspicious:
                 match = pattern.search(content)
                 if match:
-                    matches.append(("medium", match.group(0), pattern.pattern, "injection"))
+                    matches.append(("medium", match.group(0), pattern.pattern, "injection", match.start()))
 
         if not matches:
-            return False, 0.0, "", "", "injection"
+            return False, 0.0, "", "", "injection", None
 
         # Calculate confidence score based on matches
         high_confidence_matches = [m for m in matches if m[0] == "high"]
@@ -1050,11 +1107,13 @@ class PromptInjectionDetector:
             matched_text = high_confidence_matches[0][1]
             matched_pattern = high_confidence_matches[0][2]
             attack_type = high_confidence_matches[0][3]
+            match_offset = high_confidence_matches[0][4]
         elif medium_confidence_matches:
             # Only medium-confidence matches
             matched_text = medium_confidence_matches[0][1]
             matched_pattern = medium_confidence_matches[0][2]
             attack_type = medium_confidence_matches[0][3]
+            match_offset = medium_confidence_matches[0][4]
             # Check if pattern has context (not standalone)
             # Look at the full content to see if there's more than just the keyword
             content_words = len(content.split())
@@ -1065,7 +1124,7 @@ class PromptInjectionDetector:
             else:
                 confidence = 0.6
         else:
-            return False, 0.0, "", "", "injection"
+            return False, 0.0, "", "", "injection", None
 
         # Different thresholds based on source type
         if source_type == "file_content":
@@ -1086,10 +1145,108 @@ class PromptInjectionDetector:
         threshold = sensitivity_thresholds.get(self.sensitivity, 0.75 if source_type == "user_prompt" else 0.90)
         is_injection = confidence >= threshold
 
+        line_number = _offset_to_line_number(content, match_offset)
+
         if is_injection:
             logger.debug(f"Detected {attack_type} pattern in {source_type}: '{matched_text[:50]}...'")
 
-        return is_injection, confidence, matched_text, matched_pattern, attack_type
+        return is_injection, confidence, matched_text, matched_pattern, attack_type, line_number
+
+    def _ml_or_hybrid_detection(self, content, source_type="user_prompt"):
+        """Perform ML or hybrid (heuristic + ML) detection.
+
+        When detector="ml": query daemon for ML prediction, fallback on error.
+        When detector="hybrid": run heuristic first, use ML for uncertain cases.
+
+        Returns:
+            Same tuple as _heuristic_detection:
+            (is_injection, confidence, matched_text, matched_pattern, attack_type, line_number)
+        """
+        if self.detector_type == "hybrid":
+            h_result = self._heuristic_detection(content, source_type)
+            is_inj, conf, matched_text, matched_pattern, attack_type, line_num = h_result
+
+            if conf >= 0.85 or conf < 0.3:
+                return h_result
+
+            logger.debug(
+                f"Heuristic uncertain (confidence={conf:.2f}), consulting ML"
+            )
+            ml_result = self._query_ml_daemon(content)
+            if ml_result is None:
+                logger.debug("ML unavailable, using heuristic result")
+                return h_result
+
+            ml_is_inj = ml_result.get("is_injection", False)
+            ml_conf = ml_result.get("confidence", 0.0)
+
+            self.last_ml_results = ml_result.get("results", [])
+            self.last_ml_strategy = ml_result.get("strategy", "")
+
+            if ml_conf > conf:
+                return (
+                    ml_is_inj, ml_conf,
+                    matched_text or content[:100],
+                    "ml_model", "injection", line_num,
+                )
+            return h_result
+
+        # detector="ml" — ML-only mode
+        ml_result = self._query_ml_daemon(content)
+        if ml_result is None:
+            return self._apply_fallback(content, source_type)
+
+        ml_is_inj = ml_result.get("is_injection", False)
+        ml_conf = ml_result.get("confidence", 0.0)
+
+        self.last_ml_results = ml_result.get("results", [])
+        self.last_ml_strategy = ml_result.get("strategy", "")
+
+        return (
+            ml_is_inj, ml_conf,
+            content[:100] if ml_is_inj else "",
+            "ml_model", "injection", None,
+        )
+
+    def _query_ml_daemon(self, content):
+        """Query daemon for ML-based detection.
+
+        Returns:
+            dict with detection results or None if unavailable
+        """
+        try:
+            from ai_guardian.daemon.client import is_daemon_running, send_ml_detect
+            if not is_daemon_running():
+                return None
+            result = send_ml_detect(content, timeout=2.0)
+            if result and result.get("available"):
+                return result
+            return None
+        except Exception as e:
+            logger.debug(f"ML daemon query failed: {e}")
+            return None
+
+    def _apply_fallback(self, content, source_type):
+        """Apply fallback_on_error strategy when ML is unavailable.
+
+        Returns:
+            Same tuple as _heuristic_detection
+        """
+        if self.fallback_on_error == "heuristic":
+            logger.warning(
+                "ML detection unavailable, falling back to heuristic"
+            )
+            return self._heuristic_detection(content, source_type)
+        elif self.fallback_on_error == "block":
+            logger.warning(
+                "ML detection unavailable, blocking (fallback_on_error=block)"
+            )
+            return (True, 1.0, "", "ml_unavailable", "injection", None)
+        else:
+            logger.warning(
+                "ML detection unavailable, allowing (fallback_on_error=allow)"
+            )
+            return (False, 0.0, "", "", "", None)
 
     def _format_error_message(
         self,
@@ -1099,7 +1256,8 @@ class PromptInjectionDetector:
         file_path: Optional[str] = None,
         tool_name: Optional[str] = None,
         source_type: str = "user_prompt",
-        attack_type: str = "injection"
+        attack_type: str = "injection",
+        line_number: Optional[int] = None
     ) -> str:
         """
         Format detailed error message for prompt injection detection.
@@ -1163,7 +1321,10 @@ class PromptInjectionDetector:
         if file_path or tool_name:
             error_msg += "\nContext:\n"
             if file_path:
-                error_msg += f"  File: {file_path}\n"
+                if line_number:
+                    error_msg += f"  File: {file_path}:{line_number}\n"
+                else:
+                    error_msg += f"  File: {file_path}\n"
             if tool_name:
                 error_msg += f"  Tool: {tool_name}\n"
             if source_type == "file_content":
@@ -1273,20 +1434,14 @@ class PromptInjectionDetector:
                     return True, error_msg, True  # Block, error message, detected
 
             # Perform detection based on configured detector type (use stripped content)
-            if self.detector_type == "heuristic":
-                is_injection, confidence, matched_text, matched_pattern, attack_type = self._heuristic_detection(content_to_check, source_type)
-            elif self.detector_type == "rebuff":
-                # Placeholder for Rebuff integration
-                logger.warning("Rebuff detector not implemented yet, falling back to heuristic")
-                is_injection, confidence, matched_text, matched_pattern, attack_type = self._heuristic_detection(content_to_check, source_type)
-            elif self.detector_type == "llm-guard":
-                # Placeholder for LLM Guard integration
-                logger.warning("LLM Guard detector not implemented yet, falling back to heuristic")
-                is_injection, confidence, matched_text, matched_pattern, attack_type = self._heuristic_detection(content_to_check, source_type)
+            if self.detector_type in ("ml", "hybrid"):
+                is_injection, confidence, matched_text, matched_pattern, attack_type, line_number = self._ml_or_hybrid_detection(content_to_check, source_type)
             else:
-                # Unknown detector type, use heuristic
-                logger.warning(f"Unknown detector type '{self.detector_type}', using heuristic")
-                is_injection, confidence, matched_text, matched_pattern, attack_type = self._heuristic_detection(content_to_check, source_type)
+                if self.detector_type not in ("heuristic", "rebuff", "llm-guard"):
+                    logger.warning(f"Unknown detector type '{self.detector_type}', using heuristic")
+                elif self.detector_type != "heuristic":
+                    logger.warning(f"{self.detector_type} detector not implemented yet, falling back to heuristic")
+                is_injection, confidence, matched_text, matched_pattern, attack_type, line_number = self._heuristic_detection(content_to_check, source_type)
 
             if is_injection:
                 # Store detection details for caller to use (e.g., violation logging)
@@ -1294,6 +1449,7 @@ class PromptInjectionDetector:
                 self.last_matched_pattern = matched_pattern
                 self.last_matched_text = matched_text
                 self.last_confidence = confidence
+                self.last_line_number = line_number
 
                 # Format error message with detailed information
                 error_msg = self._format_error_message(
@@ -1303,7 +1459,8 @@ class PromptInjectionDetector:
                     file_path=file_path,
                     tool_name=tool_name,
                     source_type=source_type,
-                    attack_type=attack_type
+                    attack_type=attack_type,
+                    line_number=line_number
                 )
 
                 # Determine log label based on attack type

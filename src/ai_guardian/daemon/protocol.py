@@ -147,3 +147,70 @@ def make_status_request():
 def make_reload_config():
     """Create a config reload request message."""
     return {"version": PROTOCOL_VERSION, "type": "reload_config"}
+
+
+def make_pause_dir(directory, minutes=0):
+    """Create a per-directory pause request message.
+
+    Args:
+        directory: Absolute path of the project directory to pause
+        minutes: Pause duration in minutes. 0 = indefinite.
+
+    Returns:
+        dict: Request envelope with version, type, and data
+    """
+    return {
+        "version": PROTOCOL_VERSION,
+        "type": "pause_dir",
+        "data": {"dir": directory, "minutes": minutes},
+    }
+
+
+def make_resume_dir(directory):
+    """Create a per-directory resume request message.
+
+    Args:
+        directory: Absolute path of the project directory to resume
+
+    Returns:
+        dict: Request envelope with version, type, and data
+    """
+    return {
+        "version": PROTOCOL_VERSION,
+        "type": "resume_dir",
+        "data": {"dir": directory},
+    }
+
+
+def make_sdk_check(check_type, data):
+    """Create an SDK security check request message.
+
+    Args:
+        check_type: "content", "file", "command", or "sanitize"
+        data: Check-specific parameters
+
+    Returns:
+        dict: Request envelope with version, type, and data
+    """
+    return {
+        "version": PROTOCOL_VERSION,
+        "type": "sdk_check",
+        "data": {"check_type": check_type, **data},
+    }
+
+
+def make_ml_detect_request(content, source_type="user_prompt"):
+    """Create an ML detection request message.
+
+    Args:
+        content: Text to classify for prompt injection
+        source_type: "user_prompt" or "file_content"
+
+    Returns:
+        dict: Request envelope with version, type, and data
+    """
+    return {
+        "version": PROTOCOL_VERSION,
+        "type": "ml_detect",
+        "data": {"content": content, "source_type": source_type},
+    }

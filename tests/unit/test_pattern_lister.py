@@ -12,6 +12,7 @@ from ai_guardian.pattern_lister import (
     CATEGORY_ALIASES,
     BuiltInGroup,
     ConfigurableKey,
+    DetectionRule,
     PatternCategory,
     PatternLister,
 )
@@ -30,8 +31,10 @@ class TestPatternLister:
         assert "ssrf_protection" in config_keys
         assert "config_file_scanning" in config_keys
         assert "secret_redaction" in config_keys
+        assert "context_poisoning" in config_keys
+        assert "supply_chain" in config_keys
         assert "violation_logging" in config_keys
-        assert len(categories) == 6
+        assert len(categories) == 8
 
     def test_get_categories_with_filter(self):
         lister = PatternLister()
@@ -276,7 +279,7 @@ class TestPatternListerJson:
         result = json.loads(lister.get_pattern_list_json())
 
         assert "categories" in result
-        assert len(result["categories"]) == 6
+        assert len(result["categories"]) == 8
 
     def test_get_pattern_list_json_filtered(self):
         lister = PatternLister(config={})
@@ -388,3 +391,172 @@ class TestCategoryAliases:
 
         for alias, target in CATEGORY_ALIASES.items():
             assert target in all_keys, f"Alias '{alias}' -> '{target}' not in available categories"
+
+
+class TestGetAllRules:
+    """Tests for get_all_rules() method."""
+
+    def test_returns_list_of_detection_rules(self):
+        lister = PatternLister()
+        rules = lister.get_all_rules()
+        assert isinstance(rules, list)
+        assert len(rules) > 0
+        assert all(isinstance(r, DetectionRule) for r in rules)
+
+    def test_includes_all_toml_categories(self):
+        lister = PatternLister()
+        rules = lister.get_all_rules()
+        categories = {r.category for r in rules}
+        for expected in [
+            "secrets", "pii", "prompt_injection", "unicode",
+            "config_exfil", "ssrf", "context_poisoning", "supply_chain",
+        ]:
+            assert expected in categories, f"Missing category: {expected}"
+
+    def test_includes_self_protection(self):
+        lister = PatternLister()
+        rules = lister.get_all_rules()
+        self_protect = [r for r in rules if r.category == "self_protection"]
+        assert len(self_protect) > 0
+        assert all(r.source == "hardcoded" for r in self_protect)
+        assert all(r.match_type == "fnmatch" for r in self_protect)
+        groups = {r.group for r in self_protect}
+        assert "Write" in groups
+        assert "Bash" in groups
+
+    def test_category_filter(self):
+        lister = PatternLister()
+        pii_rules = lister.get_all_rules(category_filter="pii")
+        assert len(pii_rules) > 0
+        assert all(r.category == "pii" for r in pii_rules)
+
+    def test_self_protection_filter(self):
+        lister = PatternLister()
+        rules = lister.get_all_rules(category_filter="self_protection")
+        assert len(rules) > 0
+        assert all(r.category == "self_protection" for r in rules)
+
+    def test_rule_fields_non_empty(self):
+        lister = PatternLister()
+        rules = lister.get_all_rules()
+        for r in rules:
+            assert r.id, f"Empty id in {r}"
+            assert r.pattern, f"Empty pattern in {r}"
+            assert r.category, f"Empty category in {r}"
+            assert r.match_type, f"Empty match_type in {r}"
+            valid = r.source in ("toml", "hardcoded") or r.source.startswith("server:")
+            assert valid, f"Bad source in {r}"
+
+    def test_total_count(self):
+        lister = PatternLister()
+        rules = lister.get_all_rules()
+        assert len(rules) >= 500
+
+
+class TestPatternServerCacheRules:
+    """Tests for pattern server cache loading in get_all_rules()."""
+
+    def _write_toml(self, path, content):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+
+    def test_includes_pattern_server_cache(self, tmp_path):
+        toml_content = """\
+[[rules]]
+id = "ps-test-001"
+match_type = "regex"
+regex = "secret_pattern"
+description = "Pattern server test rule"
+group = "test_group"
+"""
+        self._write_toml(tmp_path / "ssrf-patterns.toml", toml_content)
+
+        with mock.patch("ai_guardian.pattern_lister.get_cache_dir", return_value=tmp_path):
+            lister = PatternLister()
+            rules = lister.get_all_rules()
+
+        ps_rules = [r for r in rules if r.source.startswith("server:")]
+        assert len(ps_rules) >= 1
+        rule = next(r for r in ps_rules if r.id == "ps-test-001")
+        assert rule.source == "server:ssrf"
+        assert rule.category == "ssrf"
+        assert rule.match_type == "regex"
+        assert rule.description == "Pattern server test rule"
+
+    def test_dedup_with_bundled(self, tmp_path):
+        """Bundled rules take precedence when IDs match."""
+        lister_pre = PatternLister()
+        bundled_rules = lister_pre.get_all_rules()
+        if not bundled_rules:
+            pytest.skip("No bundled rules available")
+        existing_id = bundled_rules[0].id
+
+        toml_content = f"""\
+[[rules]]
+id = "{existing_id}"
+match_type = "regex"
+regex = "duplicate_pattern"
+description = "Should be skipped"
+"""
+        self._write_toml(tmp_path / "secrets-patterns.toml", toml_content)
+
+        with mock.patch("ai_guardian.pattern_lister.get_cache_dir", return_value=tmp_path):
+            lister = PatternLister()
+            rules = lister.get_all_rules()
+
+        matches = [r for r in rules if r.id == existing_id]
+        assert all(not r.source.startswith("server:") for r in matches)
+
+    def test_gitleaks_format_normalized(self, tmp_path):
+        """Gitleaks-format rules (no match_type, has regex field) are normalized."""
+        toml_content = """\
+[[rules]]
+id = "gitleaks-test-001"
+regex = "sk_live_[a-zA-Z0-9]{24}"
+description = "Stripe live key"
+tags = ["type:secret", "alert:repo-owner"]
+keywords = ["sk_live_"]
+"""
+        self._write_toml(tmp_path / "patterns.toml", toml_content)
+
+        with mock.patch("ai_guardian.pattern_lister.get_cache_dir", return_value=tmp_path):
+            lister = PatternLister()
+            rules = lister.get_all_rules()
+
+        ps_rules = [r for r in rules if r.id == "gitleaks-test-001"]
+        assert len(ps_rules) == 1
+        rule = ps_rules[0]
+        assert rule.source == "server:gitleaks"
+        assert rule.match_type == "regex"
+        assert rule.pattern == "sk_live_[a-zA-Z0-9]{24}"
+        assert rule.category == "secrets"
+        assert "type:secret" in rule.group
+
+    def test_no_cache_dir_no_error(self, tmp_path):
+        """Empty or missing cache dir doesn't cause errors."""
+        missing = tmp_path / "nonexistent"
+        with mock.patch("ai_guardian.pattern_lister.get_cache_dir", return_value=missing):
+            lister = PatternLister()
+            rules = lister.get_all_rules()
+
+        assert isinstance(rules, list)
+        ps_rules = [r for r in rules if r.source.startswith("server:")]
+        assert len(ps_rules) == 0
+
+    def test_category_filter_applies_to_cache(self, tmp_path):
+        """Category filter excludes non-matching pattern server rules."""
+        toml_content = """\
+[[rules]]
+id = "ps-ssrf-001"
+match_type = "regex"
+regex = "ssrf_pattern"
+description = "SSRF rule"
+"""
+        self._write_toml(tmp_path / "ssrf-patterns.toml", toml_content)
+
+        with mock.patch("ai_guardian.pattern_lister.get_cache_dir", return_value=tmp_path):
+            lister = PatternLister()
+            rules = lister.get_all_rules(category_filter="pii")
+
+        ps_rules = [r for r in rules if r.source.startswith("server:")]
+        assert len(ps_rules) == 0

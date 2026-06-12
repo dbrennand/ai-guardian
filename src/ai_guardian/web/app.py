@@ -138,10 +138,22 @@ class WebConsole:
             from ai_guardian.web.pages.metrics import create_metrics_page
             create_metrics_page(service, daemon_name)
 
+        @ui.page("/{daemon_name}/performance")
+        def performance_page(daemon_name: str):
+            from ai_guardian.web.pages.performance import create_performance_page
+            create_performance_page(service, daemon_name)
+
         @ui.page("/{daemon_name}/logs")
         def logs_page(daemon_name: str):
             from ai_guardian.web.pages.logs import create_logs_page
             create_logs_page(service, daemon_name)
+
+        @ui.page("/{daemon_name}/permission-rules")
+        def permission_rules_page(daemon_name: str):
+            from ai_guardian.web.pages.permission_rules import (
+                create_permission_rules_page,
+            )
+            create_permission_rules_page(service, daemon_name)
 
         @ui.page("/{daemon_name}/skills")
         def skills_page(daemon_name: str):
@@ -168,6 +180,13 @@ class WebConsole:
                 create_permissions_discovery_page,
             )
             create_permissions_discovery_page(service, daemon_name)
+
+        @ui.page("/{daemon_name}/auto-directory-rules")
+        def auto_directory_rules_page(daemon_name: str):
+            from ai_guardian.web.pages.auto_directory_rules import (
+                create_auto_directory_rules_page,
+            )
+            create_auto_directory_rules_page(service, daemon_name)
 
         @ui.page("/{daemon_name}/directory-rules")
         def directory_rules_page(daemon_name: str):
@@ -202,6 +221,13 @@ class WebConsole:
             )
             create_pi_detection_page(service, daemon_name)
 
+        @ui.page("/{daemon_name}/pi-ml-engines")
+        def pi_ml_engines_page(daemon_name: str):
+            from ai_guardian.web.pages.pi_ml_engines import (
+                create_pi_ml_engines_page,
+            )
+            create_pi_ml_engines_page(service, daemon_name)
+
         @ui.page("/{daemon_name}/pi-patterns")
         def pi_patterns_page(daemon_name: str):
             from ai_guardian.web.pages.pi_patterns import (
@@ -222,6 +248,13 @@ class WebConsole:
                 create_pi_unicode_page,
             )
             create_pi_unicode_page(service, daemon_name)
+
+        @ui.page("/{daemon_name}/context-poisoning")
+        def context_poisoning_page(daemon_name: str):
+            from ai_guardian.web.pages.context_poisoning import (
+                create_context_poisoning_page,
+            )
+            create_context_poisoning_page(service, daemon_name)
 
         @ui.page("/{daemon_name}/ssrf")
         def ssrf_page(daemon_name: str):
@@ -283,6 +316,13 @@ class WebConsole:
                 create_config_effective_page,
             )
             create_config_effective_page(service, daemon_name)
+
+        @ui.page("/{daemon_name}/detection-patterns")
+        def detection_patterns_page(daemon_name: str):
+            from ai_guardian.web.pages.detection_patterns import (
+                create_detection_patterns_page,
+            )
+            create_detection_patterns_page(service, daemon_name)
 
         @ui.page("/{daemon_name}/regex-tester")
         def regex_tester_page(daemon_name: str):

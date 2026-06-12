@@ -33,6 +33,7 @@ _SAFE_SUGGESTIONS: Dict[str, str] = {
     "ssrf_blocked": "The URL targets a restricted network resource",
     "config_file_exfil": "This configuration file is protected from exfiltration",
     "jailbreak_detected": "The content contains patterns that match jailbreak detection",
+    "supply_chain": "This agent configuration file contains suspicious supply chain patterns",
 }
 
 try:
@@ -379,6 +380,7 @@ def create_server() -> "FastMCP":
                 "secret_redaction",
                 "transcript_scanning",
                 "image_scanning",
+                "supply_chain",
             ]
             for key in feature_keys:
                 section = config.get(key, {})
@@ -699,8 +701,7 @@ def run_mcp_server() -> int:
     """Start the MCP server via stdio transport. Called by CLI: ai-guardian mcp-server."""
     if not HAS_MCP:
         print(
-            "Error: MCP SDK not available. Install with: pip install 'ai-guardian[mcp]' "
-            "or pip install 'mcp>=1.8.0' (requires Python >=3.10)",
+            "Error: MCP SDK not available (requires Python >= 3.10).",
             file=sys.stderr,
         )
         return 1

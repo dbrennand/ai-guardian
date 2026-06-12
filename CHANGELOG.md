@@ -7,7 +7,182 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.1] - 2026-06-11
+
 ### Added
+
+- **Curl file upload exfiltration detection** (Issue #1101)
+  - Detect `curl -F`, `curl --upload-file`, and `curl -T` patterns targeting external hosts
+  - New config-exfil patterns for file upload via HTTP
+
+- **Web console: auto-scroll active sidebar item into view** (Issue #1104)
+  - Active navigation item scrolls into view on page load
+
+- **Daemon Python resolution and version sync** (Issue #1103)
+  - Improved Python executable resolution using `shutil.which` for reliable path discovery
+  - Version sync between daemon and tray processes
+
+### Fixed
+
+- **Web console: defer codemirror editor initialization** (Issue #1102)
+  - Fix duplicate nicegui-codemirror ESM module assertion error
+
+- **Web console: make sidebar sticky with scrollable navigation** (Issue #1104)
+  - Sidebar stays fixed while content scrolls
+
+### Changed
+
+- **README: curl install.sh should reference release tag, not main branch**
+  - Install command URLs now point to versioned release tags
+
+- **CI: add release-* branch trigger to workflows** (Issue #1108)
+
+## [1.11.0] - 2026-06-11
+
+### Added
+
+- **Supply Chain Scanning** (Issue #1055)
+  - New violation type `SUPPLY-CHAIN-001` for detecting malicious patterns in agent configuration files
+  - Scans hooks (Claude, Cursor, Copilot, Codex, Windsurf, Gemini, Augment), MCP server configs, and plugin files (OpenCode, AiderDesk)
+  - 8 detection categories: download-and-execute, obfuscation, env hijacking, network exfiltration, MCP suspicious commands, config key hijacking, reverse shells, plugin dangerous APIs
+  - Active in all 3 hooks: UserPromptSubmit (pasted config), PreToolUse (write to config), PostToolUse (read poisoned config)
+  - CLI: `ai-guardian scan --agent-configs` scans known agent config paths
+  - TUI and Web console toggles with block/warn/log-only action modes
+  - Self-allowlist: ai-guardian's own plugin files never flagged
+  - Default action: `block` (low false-positive risk due to path-specific + pattern-specific targeting)
+
+- **Hook Latency Metrics** (Issue #1057)
+  - Per-hook (PreToolUse/PostToolUse/UserPromptSubmit) and per-violation-type timing instrumentation
+  - New `latency_tracking` config section (disabled by default, opt-in for debugging)
+  - CLI: `ai-guardian metrics --latency` with avg/stddev/P95/min/max statistics
+  - Web Console: new "Performance" page under Monitoring with sortable tables and latency threshold highlighting
+  - TUI Console: new "Performance" panel with hook latency and per-check breakdown tables
+  - Data stored in append-only `latency.jsonl` alongside violations.jsonl with configurable retention
+
+### Changed
+
+- **Docs: prefer uv over pip in install instructions** (Issue #1051)
+  - Flipped uv/pip order across README.md, AGENTS.md, and docs/ files
+  - uv shown as recommended, pip as alternative — matches install.sh behavior
+
+### Added
+
+- **Hook-pipeline smoke tests for SSRF, config exfil, and password** (Issue #1017)
+  - PreToolUse: SSRF detection in Bash commands (`curl` to metadata endpoint)
+  - PreToolUse: Config exfiltration in Bash commands (`env | curl` pattern)
+  - UserPromptSubmit: Password detection in user prompts via toml-patterns engine
+
+- **Generic password/secret assignment detection** (Issue #1015)
+  - New TOML pattern `generic-password-assignment` detects `password = "value"` format
+  - Covers: password, passwd, secret, secret_key, api_secret, db_password, db_passwd
+  - Case-insensitive matching, supports both single and double quotes
+  - Minimum 8-char value length to avoid short-value false positives
+  - Uses `env_not_file_path` validator to skip file paths and placeholders
+
+- **Smoke test workflow** (Issue #1006)
+  - New `.github/workflows/smoke-tests.yml` covering all 16 violation types
+  - Detection tests via `ai-guardian scan`: secrets, PII Phase 1+2, prompt injection, jailbreak, SSRF, config exfil, context poisoning
+  - Hook pipeline tests via `process_hook_data()`: PreToolUse (secret deny, directory block), PostToolUse (redaction), UserPromptSubmit (injection)
+  - False positive checks: clean Python, env var PATH, pytest tracebacks
+  - Triggers: pull_request to main, workflow_call, workflow_dispatch
+  - Release-readiness.yml now calls smoke-tests via `workflow_call` instead of inline detection-end-to-end job
+
+- **ML-based prompt injection detection** (Issue #185)
+  - Multi-engine ML detection using ONNX models running in daemon process
+  - New detector modes: `ml` (ML-only) and `hybrid` (heuristic + ML for uncertain cases)
+  - Multi-engine execution strategies: `first-match`, `any-match`, `consensus` (mirrors secret scanning pattern)
+  - Configurable `fallback_on_error`: `heuristic` (default), `block`, or `allow`
+  - Default model: `protectai/deberta-v3-base-prompt-injection-v2` (DeBERTa v3, ~370 MB)
+  - New CLI: `ai-guardian ml download|list|status|verify`
+  - New daemon endpoints: socket `ml_detect`, REST `POST /api/ml-detect`, `GET /api/ml-status`
+  - Doctor health check for ML dependencies and model availability
+  - `tokenizers` moved to main dependencies (Python 3.10+); `onnxruntime` bundled via `rapidocr-onnxruntime` (Python < 3.13)
+
+### Fixed
+
+- **Tray: keep menu items enabled when daemon is idle-stopped** (Issue #999)
+  - Console, Violations, Metrics & Audit, Statistics, and About menu items now stay enabled when the daemon is idle-stopped but auto-restart is possible
+  - Clicking an enabled item auto-starts the daemon (via existing `_check_and_autostart_daemon()`) then opens the requested view
+  - Items remain grayed out when the daemon was explicitly stopped (`daemon.stop-requested` marker) or when running in embedded (non-standalone) mode
+  - Added `_can_autostart_daemon()` helper that checks standalone mode and stop-requested marker
+  - `_check_and_autostart_daemon()` now returns bool indicating if daemon is ready after the call
+
+- **Replace unmaintained `toml` package with `tomli-w` for TOML writing** (Issue #969)
+  - Replaced undeclared `toml` dependency (unmaintained since Dec 2020) with `tomli-w>=1.0.0`
+  - TOML reading now uses `tomllib` (stdlib 3.11+) / `tomli` (backport), matching the rest of the codebase
+  - TOML writing uses `tomli_w.dump()` with binary mode
+  - Removed `toml is None` fallback guards (both libraries are now declared dependencies)
+
+### Added
+
+- **Expand toml-patterns with platform-specific secret rules** (Issue #972)
+  - Added 8 new gap-filling rules for platforms not covered by gitleaks/leaktk engines
+  - **Payment/Financial**: Square OAuth Secret (`sq0csp-`), PayPal/Braintree Access Token (`access_token$`), PayPal Client Secret (context-based)
+  - **CI/CD**: CircleCI API Token, Jenkins API Token (context-based with hex validation)
+  - **Database**: MongoDB Atlas API Key (UUID format with context), Supabase Service/Anon Key (JWT with context)
+  - **AI/ML**: Replicate API Token (`r8_` prefix)
+  - Updated `token_not_placeholder` validator to support `sq0csp-` and `r8_` prefixes
+  - Audited all 6 issue categories against gitleaks rule set; 15 platforms already covered by gitleaks skipped
+  - secrets.toml now contains 52 rules (up from 44)
+  - 24 new tests covering detection, false positive resistance, and placeholder rejection
+
+- **Secret liveness validation** (Issue #971)
+  - After pattern-match detection, optionally validate secrets against their provider API to check if they're still active
+  - **Built-in validators** for 6 services: GitHub tokens, OpenAI API keys, Anthropic API keys, Slack tokens, GitLab tokens, npm tokens
+  - **Custom validators** via TOML pattern rules using `live_validation = { url, auth, expect }` syntax
+  - **Result categories**: `verified` (active, block), `unverified` (no validator, block), `inactive` (revoked/expired, warn only)
+  - **Opt-in only** (`secret_scanning.validate_secrets: true`) — privacy-sensitive, sends secrets to provider APIs
+  - New config options: `validate_secrets`, `validation_timeout_ms`, `on_inactive`
+  - Parallel validation with configurable timeout (default 3000ms)
+  - Integration at all secret detection paths (strategy, legacy subprocess, fallthroughs)
+  - 65 new tests covering all validators, batch validation, filtering, and hook integration
+  - New `validation_status` field on `SecretMatch` dataclass
+
+- **Per-directory pause for daemon scanning** (Issue #958)
+  - Pause scanning for a specific project directory without affecting other projects
+  - `DaemonState`: new `pause_dir()`, `resume_dir()`, `is_dir_paused()`, `get_paused_dirs()` methods
+  - CLI: `ai-guardian daemon pause --dir /path [--minutes N]` and `ai-guardian daemon resume --dir /path`
+  - CLI: `ai-guardian daemon pause [--minutes N]` and `ai-guardian daemon resume` for global pause/resume
+  - Socket protocol: new `pause_dir` / `resume_dir` message types
+  - REST API: new `POST /api/pause_dir` and `POST /api/resume_dir` endpoints
+  - `daemon status` now displays paused directories with remaining time
+  - Global pause takes precedence; per-dir pause is independent
+  - Time-limited per-dir pauses auto-expire like global pauses
+  - Protocol: new `make_pause_dir()` / `make_resume_dir()` message factories
+  - Client: new `send_pause_dir()` / `send_resume_dir()` functions
+  - 21 new tests covering state, protocol, and server integration
+
+- **Web and TUI console panel for auto_directory_rules** (Issue #966)
+  - New "Auto Directory Rules" page in web console under Permissions sidebar group
+  - Toggle enabled/disabled and allow_symlinks settings
+  - Read-only preview of discovered skills, matched skills, and generated directory rules
+  - Status indicators: directories scanned, skills discovered, skills matched, rules generated
+  - Skill permission patterns display (from permissions.rules[Skill] allow rules)
+  - Scanned directories listing with all standard IDE skill locations
+  - Matching TUI panel with switches, status display, and rules list
+  - 33 new tests (14 web, 19 TUI) covering imports, routing, sidebar, generator, and config save
+
+- **Support bundle email destination (SMTP)** (Issue #932)
+  - Email as a support bundle destination alongside S3, GCS, and local filesystem
+  - `_zip_bundle()` helper zips all bundle files into a single attachment
+  - `_send_to_email()` with MIME multipart message and zip attachment
+  - Three auth methods: `none` (corporate relay), `env` (environment variables), `inline` (hardcoded, doctor warns)
+  - STARTTLS (port 587) and implicit SSL (port 465) support
+  - Zip size check with warning when >10 MB
+  - Fallback: opens system `mailto:` handler when no SMTP host configured
+  - `mailto:` and `@` destination detection in `send_bundle()`
+  - Doctor `check_email_auth` warns for inline credentials and missing SMTP host
+  - Config schema, setup.py, example config, and all profiles updated
+  - Zero new dependencies (Python stdlib: `smtplib`, `email.mime`, `zipfile`)
+  - 26 new tests covering all auth methods, TLS modes, errors, and fallback
+
+- **Transcript scanning for Copilot CLI and Codex** (Issue #935)
+  - Copilot CLI: scans JSONL transcript at `~/.copilot/session-state/events.jsonl`
+  - Codex: discovers and scans JSONL transcripts in `~/.codex/sessions/YYYY/MM/DD/*.jsonl`
+  - Added `get_default_transcript_paths()` to `HookAdapter` base class for adapter-resolved paths
+  - Reuses existing JSONL incremental reader (`scan_transcript_incremental`)
+  - Position tracking and dedup work identically to Claude Code transcript scanning
+  - Updated AGENT_SUPPORT.md violation type coverage matrix
 
 - **False positive handling documentation** (Issue #946)
   - Added "Handling False Positives" section to COOKBOOK.md with `.gitleaksignore` format, allowlist patterns, common scenarios, and decision guide
@@ -2289,7 +2464,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Preserves existing configuration
   - Interactive and non-interactive modes
 
-[Unreleased]: https://github.com/itdove/ai-guardian/compare/v1.10.0...HEAD
+[Unreleased]: https://github.com/itdove/ai-guardian/compare/v1.11.0...HEAD
+[1.11.1]: https://github.com/itdove/ai-guardian/compare/v1.11.0...v1.11.1
+[1.11.0]: https://github.com/itdove/ai-guardian/compare/v1.10.0...v1.11.0
 [1.10.0]: https://github.com/itdove/ai-guardian/compare/v1.9.1...v1.10.0
 [1.9.1]: https://github.com/itdove/ai-guardian/compare/v1.9.0...v1.9.1
 [1.9.0]: https://github.com/itdove/ai-guardian/compare/v1.8.1...v1.9.0

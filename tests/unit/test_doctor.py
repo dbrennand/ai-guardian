@@ -567,7 +567,7 @@ class TestCheckTraySupport:
             doctor = Doctor()
             result = doctor.check_tray_support()
         assert result.status == CheckStatus.WARN
-        assert "pystray not installed" in result.message
+        assert "pystray not available" in result.message
 
     @mock.patch("ai_guardian.doctor.platform.system", return_value="Darwin")
     def test_macos_pystray_available(self, _mock_sys, _isolate_config_dir):
@@ -579,9 +579,10 @@ class TestCheckTraySupport:
 
     @mock.patch("ai_guardian.doctor.platform.system", return_value="Linux")
     def test_skip_non_gnome(self, _mock_sys, _isolate_config_dir):
-        with mock.patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "KDE"}):
-            doctor = Doctor()
-            result = doctor.check_tray_support()
+        with mock.patch.dict("sys.modules", {"gi": mock.MagicMock()}):
+            with mock.patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "KDE"}):
+                doctor = Doctor()
+                result = doctor.check_tray_support()
         assert result.status == CheckStatus.SKIP
         assert "KDE" in result.message
 
@@ -593,10 +594,11 @@ class TestCheckTraySupport:
             "user-theme@gnome-shell-extensions.gcampax.github.com\n"
             "appindicatorsupport@rgcjonas.gmail.com\n"
         )
-        with mock.patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "GNOME"}):
-            with mock.patch("ai_guardian.doctor.subprocess.run", return_value=mock_result):
-                doctor = Doctor()
-                result = doctor.check_tray_support()
+        with mock.patch.dict("sys.modules", {"gi": mock.MagicMock()}):
+            with mock.patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "GNOME"}):
+                with mock.patch("ai_guardian.doctor.subprocess.run", return_value=mock_result):
+                    doctor = Doctor()
+                    result = doctor.check_tray_support()
         assert result.status == CheckStatus.PASS
         assert "AppIndicator extension enabled" in result.message
 
@@ -605,10 +607,11 @@ class TestCheckTraySupport:
     def test_warn_extension_missing(self, _mock_which, _mock_sys, _isolate_config_dir):
         mock_result = mock.MagicMock()
         mock_result.stdout = "user-theme@gnome-shell-extensions.gcampax.github.com\n"
-        with mock.patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "GNOME"}):
-            with mock.patch("ai_guardian.doctor.subprocess.run", return_value=mock_result):
-                doctor = Doctor()
-                result = doctor.check_tray_support()
+        with mock.patch.dict("sys.modules", {"gi": mock.MagicMock()}):
+            with mock.patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "GNOME"}):
+                with mock.patch("ai_guardian.doctor.subprocess.run", return_value=mock_result):
+                    doctor = Doctor()
+                    result = doctor.check_tray_support()
         assert result.status == CheckStatus.WARN
         assert "AppIndicator" in result.message
         assert result.fix_hint is not None
@@ -617,11 +620,43 @@ class TestCheckTraySupport:
     @mock.patch("ai_guardian.doctor.platform.system", return_value="Linux")
     @mock.patch("ai_guardian.doctor.shutil.which", return_value=None)
     def test_skip_no_gnome_extensions_cmd(self, _mock_which, _mock_sys, _isolate_config_dir):
-        with mock.patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "GNOME"}):
-            doctor = Doctor()
-            result = doctor.check_tray_support()
+        with mock.patch.dict("sys.modules", {"gi": mock.MagicMock()}):
+            with mock.patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "GNOME"}):
+                doctor = Doctor()
+                result = doctor.check_tray_support()
         assert result.status == CheckStatus.SKIP
         assert "gnome-extensions" in result.message
+
+    @mock.patch("ai_guardian.doctor.platform.system", return_value="Linux")
+    def test_warn_gi_unavailable(self, _mock_sys, _isolate_config_dir):
+        import builtins
+        real_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "gi":
+                raise ImportError("no gi")
+            return real_import(name, *args, **kwargs)
+
+        with mock.patch("builtins.__import__", side_effect=fake_import):
+            doctor = Doctor()
+            result = doctor.check_tray_support()
+        assert result.status == CheckStatus.WARN
+        assert "gi" in result.message
+        assert result.fix_hint is not None
+        assert "PyGObject" in result.fix_hint
+
+    @mock.patch("ai_guardian.doctor.platform.system", return_value="Linux")
+    @mock.patch("ai_guardian.doctor.shutil.which", return_value="/usr/bin/gnome-extensions")
+    def test_pass_gi_available_and_extension_enabled(self, _mock_which, _mock_sys, _isolate_config_dir):
+        """gi available + AppIndicator enabled = PASS."""
+        mock_result = mock.MagicMock()
+        mock_result.stdout = "appindicatorsupport@rgcjonas.gmail.com\n"
+        with mock.patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "GNOME"}):
+            with mock.patch("ai_guardian.doctor.subprocess.run", return_value=mock_result):
+                with mock.patch.dict("sys.modules", {"gi": mock.MagicMock()}):
+                    doctor = Doctor()
+                    result = doctor.check_tray_support()
+        assert result.status == CheckStatus.PASS
 
 
 class TestCheckTerminalEmulator:
@@ -673,7 +708,10 @@ class TestCheckConsoleDeps:
                 doctor = Doctor()
                 result = doctor.check_console_deps()
                 assert result.status == CheckStatus.WARN
-                assert "tree-sitter-json" in result.message
+                if sys.version_info < (3, 10):
+                    assert "Python >= 3.10" in result.message
+                else:
+                    assert "tree-sitter-json" in result.message
 
 
 class TestCheckConfigConsistency:
@@ -942,10 +980,8 @@ class TestCheckPsCacheFreshness:
         self._write_ps_config(_isolate_config_dir)
         doctor = Doctor()
         result = doctor.check_ps_cache_freshness()
-        assert result.status == CheckStatus.WARN
-        assert "No cached patterns" in result.message
-        assert result.fixable is True
-        assert result.fixed is False
+        assert result.status == CheckStatus.PASS
+        assert "No cached patterns yet" in result.message
 
     def test_custom_cache_path(self, _isolate_config_dir, tmp_path):
         cache_file = tmp_path / "custom" / "my-patterns.toml"
@@ -1170,7 +1206,7 @@ class TestDoctorRunAll:
         doctor = Doctor()
         report = doctor.run_all()
         assert isinstance(report, DoctorReport)
-        assert len(report.checks) == 24
+        assert len(report.checks) == 27
         assert report.version != ""
 
     def test_check_crash_handled(self, _isolate_config_dir):
@@ -1225,3 +1261,50 @@ class TestCheckTrayPlugins:
             result = doctor.check_tray_plugins()
             assert result.status == CheckStatus.WARN
             assert "Circular import" in result.message
+
+
+class TestCheckImageScanning:
+    """Tests for check_image_scanning (Issue #1048)."""
+
+    def test_missing_image_scanning_key_defaults_enabled(self, _isolate_config_dir):
+        """When image_scanning key is absent, should NOT report SKIP."""
+        config_path = _isolate_config_dir / "ai-guardian.json"
+        config_path.write_text(json.dumps({"secret_scanning": {"enabled": True}}))
+        doctor = Doctor()
+        with mock.patch("ai_guardian.doctor.RapidOCR", create=True):
+            result = doctor.check_image_scanning()
+        assert result.status != CheckStatus.SKIP
+
+    def test_empty_image_scanning_dict_defaults_enabled(self, _isolate_config_dir):
+        """When image_scanning is empty dict, enabled defaults to True."""
+        config_path = _isolate_config_dir / "ai-guardian.json"
+        config_path.write_text(json.dumps({"image_scanning": {}}))
+        doctor = Doctor()
+        with mock.patch("ai_guardian.doctor.RapidOCR", create=True):
+            result = doctor.check_image_scanning()
+        assert result.status != CheckStatus.SKIP
+
+    def test_explicitly_disabled(self, _isolate_config_dir):
+        """When image_scanning.enabled is False, should SKIP."""
+        config_path = _isolate_config_dir / "ai-guardian.json"
+        config_path.write_text(json.dumps({"image_scanning": {"enabled": False}}))
+        doctor = Doctor()
+        result = doctor.check_image_scanning()
+        assert result.status == CheckStatus.SKIP
+        assert "not enabled" in result.message
+
+    def test_explicitly_enabled_with_rapidocr(self, _isolate_config_dir):
+        """When enabled and rapidocr available, should PASS."""
+        config_path = _isolate_config_dir / "ai-guardian.json"
+        config_path.write_text(json.dumps({"image_scanning": {"enabled": True}}))
+        doctor = Doctor()
+        with mock.patch.dict("sys.modules", {"rapidocr_onnxruntime": mock.MagicMock()}):
+            result = doctor.check_image_scanning()
+        assert result.status == CheckStatus.PASS
+
+    def test_no_config_file_defaults_enabled(self, _isolate_config_dir):
+        """With no config file at all, image scanning defaults enabled."""
+        doctor = Doctor()
+        with mock.patch.dict("sys.modules", {"rapidocr_onnxruntime": mock.MagicMock()}):
+            result = doctor.check_image_scanning()
+        assert result.status != CheckStatus.SKIP

@@ -231,9 +231,55 @@ class DaemonServer:
             elif msg_type == "resume":
                 self.state.resume()
                 response = make_response({"status": "resumed"})
+            elif msg_type == "pause_dir":
+                data = request.get("data", {})
+                directory = data.get("dir", "")
+                minutes = data.get("minutes", 0)
+                if not directory:
+                    response = make_response({"error": "dir is required"})
+                else:
+                    self.state.pause_dir(directory, minutes)
+                    response = make_response({
+                        "status": "dir_paused", "dir": directory,
+                        "minutes": minutes,
+                    })
+            elif msg_type == "resume_dir":
+                data = request.get("data", {})
+                directory = data.get("dir", "")
+                if not directory:
+                    response = make_response({"error": "dir is required"})
+                else:
+                    self.state.resume_dir(directory)
+                    response = make_response({
+                        "status": "dir_resumed", "dir": directory,
+                    })
             elif msg_type == "reload_config":
                 self.state.force_reload_config()
                 response = make_response({"status": "config_reloaded"})
+            elif msg_type == "ml_detect":
+                data = request.get("data", {})
+                content = data.get("content", "")
+                if not content:
+                    response = make_response({"error": "content is required"})
+                else:
+                    manager = self.state.get_ml_engine_manager()
+                    if manager is None:
+                        ml_status = self.state.get_ml_status()
+                        response = make_response({
+                            "available": False,
+                            "error": ml_status.get(
+                                "ml_load_error", "ML model not available"
+                            ),
+                        })
+                    else:
+                        result = manager.detect(content)
+                        response = make_response(result)
+            elif msg_type == "sdk_check":
+                data = request.get("data", {})
+                response_data = self._handle_sdk_check(data)
+                response = make_response(response_data)
+            elif msg_type == "ml_status":
+                response = make_response(self.state.get_ml_status())
             else:
                 response = make_response(
                     {"error": f"Unknown message type: {msg_type}"}
@@ -265,6 +311,10 @@ class DaemonServer:
         self.state.record_activity()
 
         cwd = hook_data.pop("_daemon_cwd", None)
+
+        # Per-directory pause (#958): skip scanning if this directory is paused
+        if cwd and self.state.is_dir_paused(cwd):
+            return {"output": "{}", "exit_code": 0}
         if cwd:
             from ai_guardian.config_utils import set_project_dir_override, clear_project_dir_override
             from ai_guardian.config_loaders import _clear_config_cache
@@ -302,6 +352,56 @@ class DaemonServer:
         result.pop("_log_only", None)
         result.pop("_violation_type", None)
         return result
+
+    def _handle_sdk_check(self, data):
+        """Process an SDK security check request.
+
+        Calls the same detection functions as _DirectSession but within
+        the daemon process, benefiting from cached config and state.
+
+        Args:
+            data: Dict with check_type and check-specific parameters
+
+        Returns:
+            dict: Result with blocked, detected, violation_type, message, details
+        """
+        self.state.record_activity()
+        check_type = data.get("check_type", "")
+
+        try:
+            from ai_guardian.sdk import _DirectSession
+            session = _DirectSession(action="log", config=self.state.get_config())
+
+            if check_type == "content":
+                result = session.check_content(
+                    data.get("text", ""),
+                    filename=data.get("filename", "input"),
+                )
+            elif check_type == "file":
+                result = session.check_file(
+                    data.get("file_path", ""),
+                    content=data.get("content"),
+                )
+            elif check_type == "command":
+                result = session.check_command(data.get("command", ""))
+            elif check_type == "sanitize":
+                sanitized = session.sanitize(data.get("text", ""))
+                return {"data": sanitized}
+            else:
+                return {"error": f"Unknown check_type: {check_type}"}
+
+            return {
+                "data": {
+                    "blocked": result.blocked,
+                    "detected": result.detected,
+                    "violation_type": result.violation_type,
+                    "message": result.message,
+                    "details": result.details,
+                }
+            }
+        except Exception as e:
+            logger.error(f"SDK check failed: {e}")
+            return {"error": str(e)}
 
     def _idle_check_loop(self):
         """Background thread: check idle timeout and cleanup expired contexts."""

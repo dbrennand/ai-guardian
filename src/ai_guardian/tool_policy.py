@@ -58,6 +58,14 @@ except ImportError:
     HAS_SSRF_PROTECTOR = False
     logging.debug("ssrf_protector module not available")
 
+# Import config exfiltration scanner
+try:
+    from ai_guardian.config_scanner import ConfigFileScanner
+    HAS_CONFIG_SCANNER = True
+except ImportError:
+    HAS_CONFIG_SCANNER = False
+    logging.debug("config_scanner module not available")
+
 logger = logging.getLogger(__name__)
 
 # Hardcoded critical protections - cannot be disabled or bypassed
@@ -88,6 +96,17 @@ IMMUTABLE_DENY_PATTERNS = {
         "*/.codex/hooks.json",
         "*/.cursor/hooks.json",
         "*/Cursor/hooks.json",        # Windows
+        "*/.github/hooks/hooks.json",         # GitHub Copilot
+        "*/.codex/hooks.json",                # OpenAI Codex
+        "*/.codeium/windsurf/hooks.json",     # Windsurf
+
+        # Script-based hooks - ALWAYS protected (prevents disabling ai-guardian)
+        "*/.clinerules/hooks/*",              # Cline / ZooCode
+        "*/.kiro/hooks/*",                    # Kiro
+
+        # Extension/plugin hooks - ALWAYS protected (prevents disabling ai-guardian)
+        "*/.aider-desk/extensions/ai-guardian/*",  # AiderDesk
+        "*/.openclaw/plugins/ai-guardian/*",        # OpenClaw
 
         # Pip-installed package code - ALWAYS protected (no git/PR review for installed packages)
         "*/site-packages/ai_guardian/*",
@@ -113,6 +132,17 @@ IMMUTABLE_DENY_PATTERNS = {
         "*/.codex/hooks.json",
         "*/.cursor/hooks.json",
         "*/Cursor/hooks.json",
+        "*/.github/hooks/hooks.json",         # GitHub Copilot
+        "*/.codex/hooks.json",                # OpenAI Codex
+        "*/.codeium/windsurf/hooks.json",     # Windsurf
+
+        # Script-based hooks - ALWAYS protected (prevents disabling ai-guardian)
+        "*/.clinerules/hooks/*",              # Cline / ZooCode
+        "*/.kiro/hooks/*",                    # Kiro
+
+        # Extension/plugin hooks - ALWAYS protected (prevents disabling ai-guardian)
+        "*/.aider-desk/extensions/ai-guardian/*",  # AiderDesk
+        "*/.openclaw/plugins/ai-guardian/*",        # OpenClaw
 
         # Pip-installed package code - ALWAYS protected (no git/PR review for installed packages)
         "*/site-packages/ai_guardian/*",
@@ -150,6 +180,13 @@ IMMUTABLE_DENY_PATTERNS = {
         "*sed*.gemini/settings.json*",
         "*sed*.augment/settings.json*",
         "*sed*.cursor/hooks.json*",
+        "*sed*.github/hooks/hooks.json*",     # Copilot
+        "*sed*.codex/hooks.json*",            # Codex
+        "*sed*.codeium/windsurf/hooks.json*", # Windsurf
+        "*sed*.clinerules/hooks/*",           # Cline / ZooCode
+        "*sed*.kiro/hooks/*",                 # Kiro
+        "*sed*.aider-desk/extensions/ai-guardian*",  # AiderDesk
+        "*sed*.openclaw/plugins/ai-guardian*",       # OpenClaw
 
         # awk protection - specific paths only
         "*awk*ai-guardian.json*", "*awk*.ai-guardian.json*",  # Config files
@@ -161,6 +198,13 @@ IMMUTABLE_DENY_PATTERNS = {
         "*awk*.gemini/settings.json*",
         "*awk*.augment/settings.json*",
         "*awk*.cursor/hooks.json*",
+        "*awk*.github/hooks/hooks.json*",     # Copilot
+        "*awk*.codex/hooks.json*",            # Codex
+        "*awk*.codeium/windsurf/hooks.json*", # Windsurf
+        "*awk*.clinerules/hooks/*",           # Cline / ZooCode
+        "*awk*.kiro/hooks/*",                 # Kiro
+        "*awk*.aider-desk/extensions/ai-guardian*",  # AiderDesk
+        "*awk*.openclaw/plugins/ai-guardian*",       # OpenClaw
 
         # vim/nano protection - specific paths only
         "*vim*ai-guardian.json*", "*vim*.ai-guardian.json*",  # Config files
@@ -171,6 +215,11 @@ IMMUTABLE_DENY_PATTERNS = {
         "*vim*.gemini/settings.json*",
         "*vim*.augment/settings.json*",
         "*vim*.cursor/hooks.json*",
+        "*vim*.github/hooks/hooks.json*",     # Copilot
+        "*vim*.codex/hooks.json*",            # Codex
+        "*vim*.codeium/windsurf/hooks.json*", # Windsurf
+        "*vim*.clinerules/hooks/*",           # Cline / ZooCode
+        "*vim*.kiro/hooks/*",                 # Kiro
         "*nano*ai-guardian.json*", "*nano*.ai-guardian.json*",  # Config files
         "*nano*.config/ai-guardian/*",  # Config directory
         "*nano*.claude/settings.json*",
@@ -179,6 +228,11 @@ IMMUTABLE_DENY_PATTERNS = {
         "*nano*.gemini/settings.json*",
         "*nano*.augment/settings.json*",
         "*nano*.cursor/hooks.json*",
+        "*nano*.github/hooks/hooks.json*",     # Copilot
+        "*nano*.codex/hooks.json*",            # Codex
+        "*nano*.codeium/windsurf/hooks.json*", # Windsurf
+        "*nano*.clinerules/hooks/*",           # Cline / ZooCode
+        "*nano*.kiro/hooks/*",                 # Kiro
 
         # chmod protection - specific paths only
         "*chmod*ai-guardian.json*", "*chmod*.ai-guardian.json*",  # Config files
@@ -190,12 +244,24 @@ IMMUTABLE_DENY_PATTERNS = {
         "*chmod*.gemini/settings.json*",
         "*chmod*.augment/settings.json*",
         "*chmod*.cursor/hooks.json*",
+        "*chmod*.github/hooks/hooks.json*",     # Copilot
+        "*chmod*.codex/hooks.json*",            # Codex
+        "*chmod*.codeium/windsurf/hooks.json*", # Windsurf
+        "*chmod*.clinerules/hooks/*",           # Cline / ZooCode
+        "*chmod*.kiro/hooks/*",                 # Kiro
+        "*chmod*.aider-desk/extensions/ai-guardian*",  # AiderDesk
+        "*chmod*.openclaw/plugins/ai-guardian*",       # OpenClaw
 
         # chattr protection - specific paths only
         "*chattr*ai-guardian.json*", "*chattr*.ai-guardian.json*",  # Config files
         "*chattr*.config/ai-guardian/*",  # Config directory
         "*chattr*.claude*", "*chattr*.codex*", "*chattr*.cursor*",
         "*chattr*.gemini*", "*chattr*.augment*",
+        "*chattr*.github/hooks*",             # Copilot
+        "*chattr*.codex*",                    # Codex
+        "*chattr*.codeium*",                  # Windsurf
+        "*chattr*.clinerules*",               # Cline / ZooCode
+        "*chattr*.kiro*",                     # Kiro
 
         # Redirect protection - specific paths only
         "*>*ai-guardian.json*", "*>*.ai-guardian.json*",  # Config files
@@ -207,6 +273,13 @@ IMMUTABLE_DENY_PATTERNS = {
         "*>*.gemini/settings.json*",
         "*>*.augment/settings.json*",
         "*>*.cursor/hooks.json*",
+        "*>*.github/hooks/hooks.json*",     # Copilot
+        "*>*.codex/hooks.json*",            # Codex
+        "*>*.codeium/windsurf/hooks.json*", # Windsurf
+        "*>*.clinerules/hooks/*",           # Cline / ZooCode
+        "*>*.kiro/hooks/*",                 # Kiro
+        "*>*.aider-desk/extensions/ai-guardian*",  # AiderDesk
+        "*>*.openclaw/plugins/ai-guardian*",       # OpenClaw
 
         # rm/mv protection - specific paths only
         "*rm*ai-guardian.json*",
@@ -216,6 +289,13 @@ IMMUTABLE_DENY_PATTERNS = {
         "*rm*.gemini/settings.json*",
         "*rm*.augment/settings.json*",
         "*rm*.cursor/hooks.json*",
+        "*rm*.github/hooks/hooks.json*",     # Copilot
+        "*rm*.codex/hooks.json*",            # Codex
+        "*rm*.codeium/windsurf/hooks.json*", # Windsurf
+        "*rm*.clinerules/hooks*",            # Cline / ZooCode
+        "*rm*.kiro/hooks*",                  # Kiro
+        "*rm*.aider-desk/extensions/ai-guardian*",  # AiderDesk
+        "*rm*.openclaw/plugins/ai-guardian*",       # OpenClaw
         "*mv*ai-guardian.json*",
         "*mv*.claude/settings.json*",
         "*mv*.codex/config.toml*",
@@ -223,6 +303,13 @@ IMMUTABLE_DENY_PATTERNS = {
         "*mv*.gemini/settings.json*",
         "*mv*.augment/settings.json*",
         "*mv*.cursor/hooks.json*",
+        "*mv*.github/hooks/hooks.json*",     # Copilot
+        "*mv*.codex/hooks.json*",            # Codex
+        "*mv*.codeium/windsurf/hooks.json*", # Windsurf
+        "*mv*.clinerules/hooks*",            # Cline / ZooCode
+        "*mv*.kiro/hooks*",                  # Kiro
+        "*mv*.aider-desk/extensions/ai-guardian*",  # AiderDesk
+        "*mv*.openclaw/plugins/ai-guardian*",       # OpenClaw
 
         # Protect ai-guardian cache from manipulation (prevents cache poisoning)
         "*rm*.cache/ai-guardian/*",
@@ -273,6 +360,15 @@ IMMUTABLE_DENY_PATTERNS = {
         "*tee*/.config/ai-guardian/*",
         "*tee*ai-guardian.json*",
         "*curl*file://*ai-guardian*",
+
+        # Self-protection: agent must NEVER pause/stop/disable ai-guardian
+        "*ai-guardian*pause*",
+        "*ai-guardian*resume*",
+        "*ai-guardian*stop*",
+        "*ai-guardian*disable*",
+        "*ai-guardian*uninstall*",
+        "*ai-guardian*daemon*stop*",
+        "*ai-guardian*tray*stop*",
     ],
 
     "PowerShell": [
@@ -329,6 +425,40 @@ IMMUTABLE_DENY_PATTERNS = {
         "*Out-File*Claude/settings.json*", "*Out-File*Cursor/hooks.json*",
         "*Out-File*.gemini/settings.json*", "*Out-File*.augment/settings.json*",
 
+        # Protect additional IDE hook files (Copilot, Codex, Windsurf)
+        "*Remove-Item*.github/hooks/hooks.json*", "*Remove-Item*.codex/hooks.json*",
+        "*Remove-Item*.codeium/windsurf/hooks.json*",
+        "*Move-Item*.github/hooks/hooks.json*", "*Move-Item*.codex/hooks.json*",
+        "*Move-Item*.codeium/windsurf/hooks.json*",
+        "*Rename-Item*.github/hooks/hooks.json*", "*Rename-Item*.codex/hooks.json*",
+        "*Rename-Item*.codeium/windsurf/hooks.json*",
+        "*Set-Content*.github/hooks/hooks.json*", "*Set-Content*.codex/hooks.json*",
+        "*Set-Content*.codeium/windsurf/hooks.json*",
+        "*Clear-Content*.github/hooks/hooks.json*", "*Clear-Content*.codex/hooks.json*",
+        "*Clear-Content*.codeium/windsurf/hooks.json*",
+        "*Out-File*.github/hooks/hooks.json*", "*Out-File*.codex/hooks.json*",
+        "*Out-File*.codeium/windsurf/hooks.json*",
+
+        # Protect script-based hook directories (Cline/ZooCode, Kiro)
+        "*Remove-Item*.clinerules/hooks*", "*Remove-Item*.kiro/hooks*",
+        "*Move-Item*.clinerules/hooks*", "*Move-Item*.kiro/hooks*",
+        "*Rename-Item*.clinerules/hooks*", "*Rename-Item*.kiro/hooks*",
+        "*Set-Content*.clinerules/hooks*", "*Set-Content*.kiro/hooks*",
+        "*Clear-Content*.clinerules/hooks*", "*Clear-Content*.kiro/hooks*",
+        "*Out-File*.clinerules/hooks*", "*Out-File*.kiro/hooks*",
+
+        # Protect extension/plugin hooks (AiderDesk, OpenClaw)
+        "*Remove-Item*.aider-desk/extensions/ai-guardian*",
+        "*Remove-Item*.openclaw/plugins/ai-guardian*",
+        "*Move-Item*.aider-desk/extensions/ai-guardian*",
+        "*Move-Item*.openclaw/plugins/ai-guardian*",
+        "*Set-Content*.aider-desk/extensions/ai-guardian*",
+        "*Set-Content*.openclaw/plugins/ai-guardian*",
+        "*Clear-Content*.aider-desk/extensions/ai-guardian*",
+        "*Clear-Content*.openclaw/plugins/ai-guardian*",
+        "*Out-File*.aider-desk/extensions/ai-guardian*",
+        "*Out-File*.openclaw/plugins/ai-guardian*",
+
         # Protect IDE hook files (Windows backslash paths)
         "*Remove-Item*Claude\\settings.json*", "*Remove-Item*Cursor\\hooks.json*",
         "*Move-Item*Claude\\settings.json*", "*Move-Item*Cursor\\hooks.json*",
@@ -352,6 +482,11 @@ IMMUTABLE_DENY_PATTERNS = {
         "*>*.codex/config.toml*", "*>*.codex/hooks.json*",
         "*>*Claude/settings.json*", "*>*Cursor/hooks.json*",
         "*>*.gemini/settings.json*", "*>*.augment/settings.json*",
+        "*>*.github/hooks/hooks.json*", "*>*.codex/hooks.json*",
+        "*>*.codeium/windsurf/hooks.json*",
+        "*>*.clinerules/hooks*", "*>*.kiro/hooks*",
+        "*>*.aider-desk/extensions/ai-guardian*",
+        "*>*.openclaw/plugins/ai-guardian*",
 
         # Protect .ai-read-deny marker files from PowerShell manipulation
         "*Remove-Item*.ai-read-deny*",
@@ -378,6 +513,13 @@ IMMUTABLE_DENY_PATTERNS = {
         "*rm *.gemini/settings.json*", "*del *.gemini/settings.json*",
         "*rm *.augment/settings.json*", "*del *.augment/settings.json*",
         "*rm *.cursor/hooks.json*", "*del *.cursor/hooks.json*",
+        "*rm *.github/hooks/hooks.json*", "*del *.github/hooks/hooks.json*",
+        "*rm *.codex/hooks.json*", "*del *.codex/hooks.json*",
+        "*rm *.codeium/windsurf/hooks.json*", "*del *.codeium/windsurf/hooks.json*",
+        "*rm *.clinerules/hooks*", "*del *.clinerules/hooks*",
+        "*rm *.kiro/hooks*", "*del *.kiro/hooks*",
+        "*rm *.aider-desk/extensions/ai-guardian*", "*del *.aider-desk/extensions/ai-guardian*",
+        "*rm *.openclaw/plugins/ai-guardian*", "*del *.openclaw/plugins/ai-guardian*",
         "*rm *.ai-read-deny*", "*del *.ai-read-deny*",
         "*mv *.ai-read-deny*", "*move *.ai-read-deny*",
 
@@ -559,6 +701,13 @@ class ToolPolicyChecker:
             "*/.codex/hooks.json",
             "*/.cursor/hooks.json",
             "*/Cursor/hooks.json",
+            "*/.github/hooks/hooks.json",  # Copilot
+            "*/.codex/hooks.json",         # Codex
+            "*/.codeium/windsurf/hooks.json",  # Windsurf
+            "*/.clinerules/hooks/*",       # Cline / ZooCode (script-based)
+            "*/.kiro/hooks/*",             # Kiro (script-based)
+            "*/.aider-desk/extensions/ai-guardian/*",  # AiderDesk
+            "*/.openclaw/plugins/ai-guardian/*",        # OpenClaw
             "*/.ai-read-deny",             # Directory markers
             "**/.ai-read-deny",
         ]
@@ -745,6 +894,38 @@ class ToolPolicyChecker:
                             violation_type=ViolationType.SSRF_BLOCKED
                         )
                         # Continue to other checks (warning is logged, execution allowed)
+
+            # PRIORITY 0.5: Check config exfiltration patterns in Bash commands
+            # Detects credential exfiltration (env|curl, aws s3 cp, etc.)
+            if HAS_CONFIG_SCANNER and tool_name == "Bash":
+                exfil_config = self.config.get("config_file_scanning", {})
+                if is_feature_enabled(exfil_config.get("enabled"), datetime.now(timezone.utc), default=True):
+                    exfil_scanner = ConfigFileScanner(exfil_config)
+                    bash_command = tool_input.get("command", "")
+                    exfil_block, exfil_msg, exfil_details = exfil_scanner.check_command(bash_command)
+
+                    if exfil_block:
+                        logger.error(f"🚨 BLOCKED: {tool_name} - credential exfiltration detected")
+                        self._log_violation(
+                            tool_name=tool_name,
+                            check_value=bash_command,
+                            reason="Credential exfiltration detected in Bash command",
+                            matcher=tool_name,
+                            hook_data=hook_data,
+                            violation_type=ViolationType.CONFIG_FILE_EXFIL
+                        )
+                        return False, exfil_msg, tool_name
+
+                    elif exfil_msg:
+                        logger.warning(f"Config exfil warning for {tool_name}: {exfil_msg}")
+                        self._log_violation(
+                            tool_name=tool_name,
+                            check_value=bash_command,
+                            reason="Config exfil warning (allowed)",
+                            matcher=tool_name,
+                            hook_data=hook_data,
+                            violation_type=ViolationType.CONFIG_FILE_EXFIL
+                        )
 
             # PRIORITY 1: Check immutable deny patterns (cannot be overridden)
             # These protect ai-guardian config, IDE hooks, and pip-installed package code

@@ -96,6 +96,174 @@ class TestTomlPatternsPiiFiltering:
         assert not any(f.rule_id == "pii-email" for f in findings)
 
 
+class TestTomlPatternsFindingCategory:
+    """Tests for category propagation through Finding objects (Issue #984)."""
+
+    def test_secret_finding_has_secrets_category(self):
+        scanner = TomlPatternsScanner()
+        findings = scanner.scan("Config: sk-abcdefghijklmnopqrstuvwxyz")
+        secret_findings = [f for f in findings if f.rule_id == "openai-api-key"]
+        assert len(secret_findings) >= 1
+        assert secret_findings[0].category == "secrets"
+
+    def test_pii_finding_has_pii_category(self):
+        scanner = TomlPatternsScanner()
+        findings = scanner.scan("SSN: 123-45-6789")
+        pii_findings = [f for f in findings if f.rule_id == "pii-ssn"]
+        assert len(pii_findings) >= 1
+        assert pii_findings[0].category == "pii"
+
+    def test_email_finding_has_pii_category(self):
+        scanner = TomlPatternsScanner()
+        scanner.configure({"pii_types": ["email"]})
+        findings = scanner.scan("Contact: user@example.com")
+        email_findings = [f for f in findings if f.rule_id == "pii-email"]
+        assert len(email_findings) >= 1
+        assert email_findings[0].category == "pii"
+
+    def test_finding_category_field_exists(self):
+        """Finding dataclass has category attribute."""
+        f = Finding(
+            rule_id="test",
+            line_number=1,
+            matched_text="test",
+            description="test",
+            category="pii",
+        )
+        assert f.category == "pii"
+
+    def test_finding_category_defaults_to_none(self):
+        f = Finding(
+            rule_id="test",
+            line_number=1,
+            matched_text="test",
+            description="test",
+        )
+        assert f.category is None
+
+
+class TestTomlPatternsGapFillingRules:
+    """Tests for platform-specific gap-filling rules (Issue #972).
+
+    These rules cover platforms NOT detected by gitleaks/leaktk engines.
+    """
+
+    def _find(self, text, rule_id):
+        scanner = TomlPatternsScanner()
+        findings = scanner.scan(text)
+        return any(f.rule_id == rule_id for f in findings)
+
+    # --- Payment / Financial ---
+
+    def test_square_oauth_secret_detected(self):
+        token = "sq0csp-" + "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789ABCDEFG"
+        assert self._find(f"SECRET={token}", "square-oauth-secret")
+
+    def test_square_oauth_secret_placeholder_skipped(self):
+        token = "sq0csp-" + "X" * 43
+        assert not self._find(f"SECRET={token}", "square-oauth-secret")
+
+    def test_square_access_token_not_matched_as_oauth_secret(self):
+        # sq0atp- is an access token (covered by gitleaks), not our rule
+        token = "sq0atp-" + "A" * 43
+        assert not self._find(f"TOKEN={token}", "square-oauth-secret")
+
+    def test_paypal_braintree_production_token(self):
+        text = "token=access_token$production$abc123def456abcd"
+        assert self._find(text, "paypal-braintree-token")
+
+    def test_paypal_braintree_sandbox_token(self):
+        text = "token=access_token$sandbox$abc123def456abcdef01"
+        assert self._find(text, "paypal-braintree-token")
+
+    def test_paypal_braintree_short_value_not_matched(self):
+        # Value after $production$ must be >= 16 chars
+        text = "token=access_token$production$short"
+        assert not self._find(text, "paypal-braintree-token")
+
+    def test_paypal_client_secret_env_var(self):
+        text = "PAYPAL_CLIENT_SECRET=AbCdEfGhIjKlMnOpQrStUvWx"
+        assert self._find(text, "paypal-client-secret")
+
+    def test_paypal_secret_case_insensitive(self):
+        text = "paypal_secret = 'AbCdEfGhIjKlMnOpQrStUvWx'"
+        assert self._find(text, "paypal-client-secret")
+
+    def test_generic_secret_not_matched_as_paypal(self):
+        text = "MY_SECRET=AbCdEfGhIjKlMnOpQrStUvWx"
+        assert not self._find(text, "paypal-client-secret")
+
+    # --- CI/CD ---
+
+    def test_circleci_token_detected(self):
+        text = "CIRCLE_TOKEN=" + "a1b2c3d4" * 5  # 40 hex chars
+        assert self._find(text, "circleci-api-token")
+
+    def test_circleci_ci_token_detected(self):
+        text = "CIRCLECI_API_TOKEN=" + "abcdef01" * 5  # 40 hex chars
+        assert self._find(text, "circleci-api-token")
+
+    def test_circleci_non_hex_not_matched(self):
+        text = "CIRCLE_TOKEN=not_a_real_hex_token_value_here"
+        assert not self._find(text, "circleci-api-token")
+
+    def test_jenkins_token_detected(self):
+        text = "JENKINS_API_TOKEN=" + "a1b2c3d4" * 4 + "ab"  # 34 hex chars
+        assert self._find(text, "jenkins-api-token")
+
+    def test_jenkins_token_case_insensitive(self):
+        text = "jenkins_token: " + "abcdef01" * 4  # 32 hex chars
+        assert self._find(text, "jenkins-api-token")
+
+    def test_jenkins_non_hex_not_matched(self):
+        text = "JENKINS_TOKEN=not-hex-characters-here!"
+        assert not self._find(text, "jenkins-api-token")
+
+    # --- Database ---
+
+    def test_mongodb_atlas_api_key_detected(self):
+        text = "MONGODB_ATLAS_PRIVATE_KEY=abcd1234-ab12-cd34-ef56-abcdef123456"
+        assert self._find(text, "mongodb-atlas-api-key")
+
+    def test_mongo_atlas_key_variant(self):
+        text = "MONGO_ATLAS_KEY: abcd1234-ab12-cd34-ef56-abcdef123456"
+        assert self._find(text, "mongodb-atlas-api-key")
+
+    def test_generic_uuid_without_atlas_context_not_matched(self):
+        text = "REQUEST_ID=abcd1234-ab12-cd34-ef56-abcdef123456"
+        assert not self._find(text, "mongodb-atlas-api-key")
+
+    def test_supabase_service_role_key_detected(self):
+        jwt = "eyJhbGciOiJIUzI1NiJ9.eyJyb2xlIjoic2VydmljZV9yb2xlIn0.M2d_0djnGBiRw1rXznITPA"
+        text = f"SUPABASE_SERVICE_ROLE_KEY={jwt}"
+        assert self._find(text, "supabase-service-role-key")
+
+    def test_supabase_anon_key_detected(self):
+        jwt = "eyJhbGciOiJIUzI1NiJ9.eyJyb2xlIjoiYW5vbiJ9.ZopqoUt20nEV9cklpv9e3yw3PVyZLmKs5qLD6nGL1SI"
+        text = f"SUPABASE_ANON_KEY={jwt}"
+        assert self._find(text, "supabase-service-role-key")
+
+    def test_generic_jwt_without_supabase_context_not_matched(self):
+        jwt = "eyJhbGciOiJIUzI1NiJ9.eyJyb2xlIjoiYW5vbiJ9.ZopqoUt20nEV9cklpv9e3yw3PVyZLmKs5qLD6nGL1SI"
+        text = f"AUTH_TOKEN={jwt}"
+        assert not self._find(text, "supabase-service-role-key")
+
+    # --- AI/ML ---
+
+    def test_replicate_api_token_detected(self):
+        token = "r8_" + "aBcDeFgHiJ" * 4  # 40 alphanumeric chars
+        assert self._find(f"TOKEN={token}", "replicate-api-token")
+
+    def test_replicate_placeholder_rejected(self):
+        token = "r8_" + "X" * 40
+        assert not self._find(f"TOKEN={token}", "replicate-api-token")
+
+    def test_short_r8_prefix_not_matched(self):
+        # r8_ followed by < 40 chars should not match
+        text = "r8_shortvalue"
+        assert not self._find(text, "replicate-api-token")
+
+
 class TestTomlPatternsEngineBuilder:
 
     def test_select_toml_patterns_engine(self):
@@ -117,3 +285,113 @@ class TestTomlPatternsEngineBuilder:
         config = select_engine(["toml-patterns"])
         assert config is not None
         assert config.python_scanner.name == "toml-patterns"
+
+
+class TestTomlPatternsAllowlist:
+    """Tests for scanner-level allowlist filtering (Issue #1093)."""
+
+    def test_configure_allowlist_suppresses_matching_finding(self):
+        scanner = TomlPatternsScanner()
+        scanner.configure({"allowlist_patterns": ["sk-abcdefghijklmnopqrstuvwxyz"]})
+        findings = scanner.scan("Config: sk-abcdefghijklmnopqrstuvwxyz")
+        assert not any(f.rule_id == "openai-api-key" for f in findings)
+
+    def test_allowlist_does_not_suppress_nonmatching(self):
+        scanner = TomlPatternsScanner()
+        scanner.configure({"allowlist_patterns": ["some-other-pattern"]})
+        findings = scanner.scan("Config: sk-abcdefghijklmnopqrstuvwxyz")
+        assert any(f.rule_id == "openai-api-key" for f in findings)
+
+    def test_allowlist_empty_list_no_effect(self):
+        scanner = TomlPatternsScanner()
+        scanner.configure({"allowlist_patterns": []})
+        findings = scanner.scan("Config: sk-abcdefghijklmnopqrstuvwxyz")
+        assert any(f.rule_id == "openai-api-key" for f in findings)
+
+    def test_allowlist_none_no_effect(self):
+        scanner = TomlPatternsScanner()
+        scanner.configure({})
+        findings = scanner.scan("Config: sk-abcdefghijklmnopqrstuvwxyz")
+        assert any(f.rule_id == "openai-api-key" for f in findings)
+
+    def test_allowlist_dangerous_pattern_blocked(self):
+        """compile_allowlist strips catch-all patterns like '.*'."""
+        scanner = TomlPatternsScanner()
+        scanner.configure({"allowlist_patterns": [".*"]})
+        findings = scanner.scan("Config: sk-abcdefghijklmnopqrstuvwxyz")
+        assert any(f.rule_id == "openai-api-key" for f in findings)
+
+
+class TestTomlPatternsIgnoreFiles:
+    """Tests for scanner-level ignore_files filtering (Issue #1093)."""
+
+    def test_ignore_files_matching_path_returns_empty(self):
+        scanner = TomlPatternsScanner()
+        scanner.configure({"ignore_files": ["**/tests/fixtures/**"]})
+        findings = scanner.scan(
+            "Config: sk-abcdefghijklmnopqrstuvwxyz",
+            file_path="/project/tests/fixtures/creds.json",
+        )
+        assert findings == []
+
+    def test_ignore_files_nonmatching_path_scans_normally(self):
+        scanner = TomlPatternsScanner()
+        scanner.configure({"ignore_files": ["**/tests/fixtures/**"]})
+        findings = scanner.scan(
+            "Config: sk-abcdefghijklmnopqrstuvwxyz",
+            file_path="/project/src/main.py",
+        )
+        assert any(f.rule_id == "openai-api-key" for f in findings)
+
+    def test_ignore_files_none_file_path_scans_normally(self):
+        scanner = TomlPatternsScanner()
+        scanner.configure({"ignore_files": ["**/tests/**"]})
+        findings = scanner.scan("Config: sk-abcdefghijklmnopqrstuvwxyz")
+        assert any(f.rule_id == "openai-api-key" for f in findings)
+
+    def test_ignore_files_empty_list_scans_normally(self):
+        scanner = TomlPatternsScanner()
+        scanner.configure({"ignore_files": []})
+        findings = scanner.scan(
+            "Config: sk-abcdefghijklmnopqrstuvwxyz",
+            file_path="/project/src/main.py",
+        )
+        assert any(f.rule_id == "openai-api-key" for f in findings)
+
+    def test_ignore_files_basename_matching(self):
+        scanner = TomlPatternsScanner()
+        scanner.configure({"ignore_files": ["*.fixture"]})
+        findings = scanner.scan(
+            "Config: sk-abcdefghijklmnopqrstuvwxyz",
+            file_path="/project/data/creds.fixture",
+        )
+        assert findings == []
+
+
+class TestTomlPatternsAllowlistAndIgnoreInteraction:
+    """Test interaction between allowlist and ignore_files (Issue #1093)."""
+
+    def test_ignore_files_takes_precedence(self):
+        """Ignored file returns [] without even checking allowlist."""
+        scanner = TomlPatternsScanner()
+        scanner.configure({
+            "allowlist_patterns": ["some-pattern"],
+            "ignore_files": ["**/fixtures/**"],
+        })
+        findings = scanner.scan(
+            "Config: sk-abcdefghijklmnopqrstuvwxyz",
+            file_path="/project/fixtures/test.json",
+        )
+        assert findings == []
+
+    def test_allowlist_filters_when_not_ignored(self):
+        scanner = TomlPatternsScanner()
+        scanner.configure({
+            "allowlist_patterns": ["sk-abcdefghijklmnopqrstuvwxyz"],
+            "ignore_files": ["**/fixtures/**"],
+        })
+        findings = scanner.scan(
+            "Config: sk-abcdefghijklmnopqrstuvwxyz",
+            file_path="/project/src/main.py",
+        )
+        assert not any(f.rule_id == "openai-api-key" for f in findings)

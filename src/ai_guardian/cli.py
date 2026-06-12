@@ -76,6 +76,80 @@ def _ensure_daemon_started():
         pass
 
 
+def _handle_ml_command(args, ml_parser):
+    """Handle ML model management subcommands."""
+    cmd = getattr(args, "ml_command", None)
+
+    if cmd is None:
+        ml_parser.print_help()
+        return 1
+
+    if cmd == "download":
+        from ai_guardian.ml_detection import is_ml_available, download_model
+        if not is_ml_available():
+            print("Error: ML dependencies not available (onnxruntime required).", file=sys.stderr)
+            return 1
+        try:
+            model_dir = download_model(
+                model_name=args.model, force=args.force
+            )
+            print(f"Model downloaded to: {model_dir}")
+            return 0
+        except Exception as e:
+            print(f"Error downloading model: {e}", file=sys.stderr)
+            return 1
+
+    elif cmd == "list":
+        from ai_guardian.ml_detection import is_ml_available, list_registered_models
+        print("ML Dependencies:", "installed" if is_ml_available() else "NOT installed")
+        print()
+        models = list_registered_models()
+        for m in models:
+            status = "downloaded" if m["downloaded"] else "not downloaded"
+            print(f"  {m['name']}")
+            print(f"    Status: {status}")
+            print(f"    Description: {m['description']}")
+            if m["path"]:
+                print(f"    Path: {m['path']}")
+            print()
+        if not models:
+            print("  No models in registry")
+        return 0
+
+    elif cmd == "status":
+        from ai_guardian.ml_detection import is_ml_available, verify_model, get_models_dir
+        print(f"ML dependencies installed: {is_ml_available()}")
+        print(f"Models directory: {get_models_dir()}")
+        is_valid, msg = verify_model()
+        print(f"Default model valid: {is_valid}")
+        print(f"  {msg}")
+
+        try:
+            from ai_guardian.daemon.client import is_daemon_running, send_status_request
+            if is_daemon_running():
+                status = send_status_request()
+                if status:
+                    print(f"\nDaemon ML model loaded: {status.get('ml_model_loaded', False)}")
+                    ml_err = status.get("ml_load_error")
+                    if ml_err:
+                        print(f"  Load error: {ml_err}")
+            else:
+                print("\nDaemon: not running")
+        except Exception:
+            print("\nDaemon: status unavailable")
+        return 0
+
+    elif cmd == "verify":
+        from ai_guardian.ml_detection import verify_model
+        is_valid, msg = verify_model(args.model)
+        print(msg)
+        return 0 if is_valid else 1
+
+    else:
+        ml_parser.print_help()
+        return 1
+
+
 def main():
     """Main entry point for the hook."""
     if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
@@ -292,6 +366,11 @@ def main():
             help="Filter by severity level"
         )
         metrics_parser.add_argument(
+            "--latency",
+            action="store_true",
+            help="Show hook latency statistics (avg, stddev, P95, min, max)"
+        )
+        metrics_parser.add_argument(
             "--reset",
             action="store_true",
             help="Reset cumulative counters to current log file counts"
@@ -389,6 +468,11 @@ def main():
             help="Only scan AI config files (CLAUDE.md, AGENTS.md, etc.)"
         )
         scan_parser.add_argument(
+            "--agent-configs",
+            action="store_true",
+            help="Scan agent configuration files for supply chain threats (~/.claude/settings.json, ~/.cursor/hooks.json, etc.)"
+        )
+        scan_parser.add_argument(
             "--sarif-output",
             metavar="FILE",
             help="Write SARIF format output to file (for CI/CD integration)"
@@ -408,6 +492,41 @@ def main():
             "-v",
             action="store_true",
             help="Enable verbose output"
+        )
+        scan_parser.add_argument(
+            "--diff",
+            action="store_true",
+            help="Scan only files changed between base branch and HEAD"
+        )
+        scan_parser.add_argument(
+            "--base",
+            metavar="REF",
+            help="Base ref for --diff (default: auto-detect default branch)"
+        )
+        scan_parser.add_argument(
+            "--staged",
+            action="store_true",
+            help="With --diff, scan only staged changes (git diff --cached)"
+        )
+        scan_parser.add_argument(
+            "--pr",
+            metavar="N_OR_URL",
+            help="Scan files changed in GitHub PR (number or URL, requires gh CLI)"
+        )
+        scan_parser.add_argument(
+            "--mr",
+            metavar="N_OR_URL",
+            help="Scan files changed in GitLab MR (number or URL, requires glab CLI)"
+        )
+        scan_parser.add_argument(
+            "--stdin-diff",
+            action="store_true",
+            help="Read unified diff from stdin and scan changed files"
+        )
+        scan_parser.add_argument(
+            "--changed-lines-only",
+            action="store_true",
+            help="Filter findings to only lines changed in the diff"
         )
 
         # Show-config subcommand (NEW in v1.5.0)
@@ -532,6 +651,46 @@ def main():
             "--json",
             action="store_true",
             help="Output as JSON"
+        )
+
+        # ML model management subcommand (#185)
+        ml_parser = subparsers.add_parser(
+            "ml",
+            help="Manage ML models for prompt injection detection"
+        )
+        ml_sub = ml_parser.add_subparsers(
+            dest="ml_command",
+            help="ML model commands"
+        )
+
+        ml_download_parser = ml_sub.add_parser(
+            "download",
+            help="Download ML model from HuggingFace"
+        )
+        ml_download_parser.add_argument(
+            "model",
+            nargs="?",
+            default="protectai/deberta-v3-base-prompt-injection-v2",
+            help="Model name from registry (default: protectai/deberta-v3-base-prompt-injection-v2)"
+        )
+        ml_download_parser.add_argument(
+            "--force",
+            action="store_true",
+            help="Re-download even if model already exists"
+        )
+
+        ml_sub.add_parser("list", help="List available and downloaded models")
+        ml_sub.add_parser("status", help="Show ML detection status")
+
+        ml_verify_parser = ml_sub.add_parser(
+            "verify",
+            help="Verify ML model integrity"
+        )
+        ml_verify_parser.add_argument(
+            "model",
+            nargs="?",
+            default="protectai/deberta-v3-base-prompt-injection-v2",
+            help="Model name to verify"
         )
 
         # Pattern-servers subcommand
@@ -715,6 +874,32 @@ def main():
         daemon_sub.add_parser("status", help="Show daemon status")
         daemon_sub.add_parser("restart", help="Restart daemon")
         daemon_sub.add_parser("reload", help="Force config reload without restart")
+
+        # Per-directory pause/resume (#958)
+        daemon_pause_parser = daemon_sub.add_parser(
+            "pause", help="Pause scanning (global or per-directory)"
+        )
+        daemon_pause_parser.add_argument(
+            "--dir",
+            type=str,
+            default=None,
+            help="Project directory to pause (default: global pause)"
+        )
+        daemon_pause_parser.add_argument(
+            "--minutes",
+            type=int,
+            default=0,
+            help="Pause duration in minutes (default: indefinite)"
+        )
+        daemon_resume_parser = daemon_sub.add_parser(
+            "resume", help="Resume scanning (global or per-directory)"
+        )
+        daemon_resume_parser.add_argument(
+            "--dir",
+            type=str,
+            default=None,
+            help="Project directory to resume (default: global resume)"
+        )
 
         # Standalone tray subcommand (Issue #527)
         tray_parser = subparsers.add_parser(
@@ -1034,7 +1219,6 @@ def main():
                     from ai_guardian.web import WebConsole, HAS_NICEGUI
                     if not HAS_NICEGUI:
                         print("Error: Web console requires NiceGUI (Python >= 3.10).", file=sys.stderr)
-                        print("Install with: pip install ai-guardian", file=sys.stderr)
                         return 1
                     console = WebConsole()
                     show = not getattr(args, "no_open", False)
@@ -1061,7 +1245,7 @@ def main():
                 app.run()
                 return 0
             except ImportError as e:
-                print(f"Error: Console dependencies not available. Install with: pip install ai-guardian", file=sys.stderr)
+                print("Error: Console dependencies not available.", file=sys.stderr)
                 print(f"Details: {e}", file=sys.stderr)
                 return 1
             except Exception as e:
@@ -1237,6 +1421,10 @@ def main():
                 import traceback
                 traceback.print_exc()
                 return 1
+
+        # Handle ml command (#185)
+        if args.command == "ml":
+            return _handle_ml_command(args, ml_parser)
 
         # Handle pattern-servers command
         if args.command == "pattern-servers":

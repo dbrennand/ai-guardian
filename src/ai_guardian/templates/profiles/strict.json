@@ -34,7 +34,11 @@
         "_comment_incremental": "Incremental scanning: only scan files whose content changed (v1.7.0+, requires cache_results)",
         "incremental": true,
         "_comment_audit": "Audit logging: log all scan operations for compliance (v1.7.0+)",
-        "audit_logging": true
+        "audit_logging": true,
+        "_comment_validate_secrets": "Secret liveness validation: check if detected secrets are still active (v1.11.0+). PRIVACY: sends secrets to provider APIs. Requires explicit opt-in.",
+        "validate_secrets": false,
+        "validation_timeout_ms": 3000,
+        "on_inactive": "warn"
     },
     "_comment_prompt_injection": "Detect and block prompt injection attacks that try to manipulate AI behavior",
     "prompt_injection": {
@@ -105,6 +109,15 @@
         "ignore_files": [],
         "additional_patterns": []
     },
+    "_comment_supply_chain": "Detect malicious patterns in agent config files — hooks, MCP servers, and plugin files (NEW in v1.11.0, Issue #1055)",
+    "supply_chain": {
+        "enabled": true,
+        "action": "block",
+        "scan_hooks": true,
+        "scan_mcp_configs": true,
+        "scan_plugins": true,
+        "allowlist_paths": []
+    },
     "_comment_permissions": "Control which tools (Skills, MCP servers, Bash, etc.) are allowed to run. Rules evaluated in order, last match wins. Strict: no catch-all allow, explicit allow required for each tool.",
     "permissions": {
         "enabled": true,
@@ -157,6 +170,12 @@
         "block_begin": [],
         "block_end": []
     },
+    "_comment_latency_tracking": "Hook latency tracking — records per-hook timing to latency.jsonl for performance analysis. Disabled by default. (NEW in v1.11.0, Issue #1057)",
+    "latency_tracking": {
+        "enabled": false,
+        "max_entries": 5000,
+        "retention_days": 30
+    },
     "_comment_violation_logging": "Log blocked operations for audit and review (NEW in v1.1.0)",
     "violation_logging": {
         "enabled": true,
@@ -175,7 +194,8 @@
             "secret_in_transcript",
             "pii_in_transcript",
             "prompt_injection_in_transcript",
-            "annotation_suppressed"
+            "annotation_suppressed",
+            "supply_chain"
         ]
     },
     "_comment_daemon": "Background daemon for faster hook processing. Auto-starts on any command, falls back to direct if unavailable.",
@@ -213,12 +233,24 @@
     "mcp_server": {
         "proactive_level": "high"
     },
-    "_comment_support": "Support bundle export. Two-step process: prepare (sanitize + review) then send (with user approval). Destination: local path, S3 URI, or GCS URI (gs://bucket-name/). (NEW in v1.7.0, Issue #477)",
+    "_comment_support": "Support bundle export. Two-step process: prepare (sanitize + review) then send (with user approval). Destination: local path, S3 URI, GCS URI (gs://bucket-name/), or email (mailto:support@company.com). (NEW in v1.7.0, Issue #477; email: Issue #932)",
     "support": {
         "export_destination": "",
         "auth": {
             "method": "none",
             "token_env": ""
+        },
+        "email": {
+            "smtp_host": "",
+            "smtp_port": 587,
+            "smtp_tls": true,
+            "from": "",
+            "subject_prefix": "[AI Guardian Support]",
+            "auth": {
+                "method": "none",
+                "username_env": "",
+                "password_env": ""
+            }
         },
         "bundle_ttl_minutes": 30
     }

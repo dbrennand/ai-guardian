@@ -4,26 +4,31 @@ import json
 
 from nicegui import run, ui
 
+from ai_guardian.web.components.local_time import (
+    inject_local_time_js,
+    local_time_label,
+)
+
 from ai_guardian.violation_guidance import get_resolution_instructions
 from ai_guardian.web.components.header import create_header, create_sidebar
 
 FILTER_TABS = [
-    ("All", None),
-    ("Tool Permission", "tool_permission"),
-    ("Secrets", "secret_detected"),
-    ("Secret Redaction", "secret_redaction"),
-    ("Directories", "directory_blocking"),
-    ("Prompt Injection", "prompt_injection"),
-    ("Jailbreak", "jailbreak_detected"),
-    ("SSRF Blocked", "ssrf_blocked"),
-    ("Config Exfil", "config_file_exfil"),
-    ("PII Detected", "pii_detected"),
-    ("Secret in Transcript", "secret_in_transcript"),
-    ("PII in Transcript", "pii_in_transcript"),
-    ("PI in Transcript", "prompt_injection_in_transcript"),
-    ("Annotation Suppressed", "annotation_suppressed"),
-    ("Image Secret", "image_secret_detected"),
-    ("Image PII", "image_pii_detected"),
+    ("All", None, "Show all violation types"),
+    ("Tool Permission", "tool_permission", "Blocked tool/MCP server execution (permission rules)"),
+    ("Secrets", "secret_detected", "Hard-coded secrets detected in files or prompts (API keys, tokens, passwords)"),
+    ("Secret Redaction", "secret_redaction", "Secrets found in tool output and redacted before reaching the AI model"),
+    ("Directories", "directory_blocking", "File access blocked by directory protection rules"),
+    ("Prompt Injection", "prompt_injection", "Attempts to manipulate AI behavior detected in prompts or files"),
+    ("Jailbreak", "jailbreak_detected", "Attempts to bypass AI safety constraints"),
+    ("SSRF Blocked", "ssrf_blocked", "Blocked access to private networks, metadata endpoints, or dangerous URLs"),
+    ("Config Exfil", "config_file_exfil", "Credential exfiltration commands detected in AI config files (CLAUDE.md, AGENTS.md)"),
+    ("PII Detected", "pii_detected", "Personal Identifiable Information found in files or prompts (SSN, credit card, phone)"),
+    ("Secret in Transcript", "secret_in_transcript", "Secret found in conversation history (possibly from ! shell command)"),
+    ("PII in Transcript", "pii_in_transcript", "Personal Identifiable Information found in conversation history"),
+    ("Injection in Transcript", "prompt_injection_in_transcript", "Prompt injection pattern found in conversation history"),
+    ("Annotation Suppressed", "annotation_suppressed", "Finding suppressed by an inline annotation (ai-guardian:allow, gitleaks:allow)"),
+    ("Image Secret", "image_secret_detected", "Secret detected in image via OCR scanning"),
+    ("Image PII", "image_pii_detected", "PII detected in image via OCR scanning"),
 ]
 
 DETAIL_FIELDS = {
@@ -94,6 +99,42 @@ def _get_resolution_instructions(violation: dict):
     return get_resolution_instructions(violation)
 
 
+def _format_violation_markdown(v: dict) -> str:
+    """Format a violation dict as readable Markdown for clipboard sharing."""
+    vtype = v.get("violation_type", v.get("type", "unknown"))
+    severity = v.get("severity", "warning")
+    timestamp = v.get("timestamp", "")
+    blocked = v.get("blocked", {})
+    if not isinstance(blocked, dict):
+        blocked = {}
+
+    lines = [f"**Type:** {vtype}"]
+    lines.append(f"**Severity:** {severity}")
+
+    fields = DETAIL_FIELDS.get(vtype, [])
+    for label, key in fields:
+        val = blocked.get(key)
+        if val is not None:
+            if key == "secret_type":
+                from ai_guardian.secret_type_names import get_secret_type_display
+                val = get_secret_type_display(str(val))
+            if isinstance(val, list):
+                val = ", ".join(str(x) for x in val)
+            lines.append(f"**{label}:** {val}")
+
+    if timestamp:
+        lines.append(f"**Time:** {timestamp}")
+
+    suggestion = v.get("suggestion", {})
+    if isinstance(suggestion, dict) and suggestion.get("rule"):
+        lines.append(
+            f"**Suggested Rule:**\n```json\n"
+            f"{json.dumps(suggestion['rule'], indent=2)}\n```"
+        )
+
+    return "\n".join(lines)
+
+
 def _load_local_violations(limit, violation_type):
     from ai_guardian.violation_logger import ViolationLogger
     vl = ViolationLogger()
@@ -121,7 +162,7 @@ def create_violations_page(service, daemon_name: str):
             buttons = {}
 
             with ui.row().classes("gap-1 flex-wrap"):
-                for label, vtype in FILTER_TABS:
+                for label, vtype, tooltip in FILTER_TABS:
                     async def on_click(vt=vtype, lbl=label):
                         active_filter["vtype"] = vt
                         for bl, b in buttons.items():
@@ -139,7 +180,7 @@ def create_violations_page(service, daemon_name: str):
                     ).props(
                         "dense size=sm no-caps"
                         + (" color=primary" if is_all else " outline")
-                    )
+                    ).tooltip(tooltip)
                     buttons[label] = btn
 
             cards_container = ui.column().classes("w-full gap-1")
@@ -182,6 +223,8 @@ def create_violations_page(service, daemon_name: str):
                     for v in all_violations:
                         _render_violation_card(v)
 
+                inject_local_time_js()
+
             ui.timer(0.1, load_violations, once=True)
 
 
@@ -218,7 +261,7 @@ def _render_violation_card(v: dict):
                 ui.badge("RESOLVED", color="green").classes("text-xs")
             if daemon:
                 ui.badge(daemon, color="blue-grey").classes("text-xs")
-            ui.label(timestamp[:19]).classes("text-xs text-grey-6 ml-auto")
+            local_time_label(timestamp).classes("ml-auto")
 
         fields = DETAIL_FIELDS.get(vtype, [])
         if fields:
@@ -228,6 +271,9 @@ def _render_violation_card(v: dict):
                     if val is not None:
                         ui.label(f"{label}:").classes("text-xs text-grey-6")
                         display = str(val)
+                        if key == "secret_type":
+                            from ai_guardian.secret_type_names import get_secret_type_display
+                            display = get_secret_type_display(display)
                         if isinstance(val, list):
                             display = ", ".join(str(x) for x in val)
                         if isinstance(val, float):
@@ -257,10 +303,31 @@ def _render_violation_card(v: dict):
             def show_details(violation=v):
                 with ui.dialog() as dialog, ui.card().classes("w-[600px]"):
                     ui.label("Violation Details").classes("text-lg font-bold")
+                    violation_json = json.dumps(
+                        violation, indent=2, default=str,
+                    )
                     ui.code(
-                        json.dumps(violation, indent=2, default=str),
-                        language="json",
+                        violation_json, language="json",
                     ).classes("max-h-[300px] overflow-auto text-xs")
+
+                    with ui.row().classes("gap-2 mt-1"):
+                        ui.button(
+                            "Copy JSON", icon="data_object",
+                            on_click=lambda vj=violation_json: (
+                                ui.run_javascript(
+                                    f"navigator.clipboard.writeText({json.dumps(vj)})"
+                                )
+                            ),
+                        ).props("flat dense size=sm")
+                        violation_md = _format_violation_markdown(violation)
+                        ui.button(
+                            "Copy as Markdown", icon="article",
+                            on_click=lambda md=violation_md: (
+                                ui.run_javascript(
+                                    f"navigator.clipboard.writeText({json.dumps(md)})"
+                                )
+                            ),
+                        ).props("flat dense size=sm")
 
                     ui.separator()
                     ui.label("How to Resolve").classes("font-bold mt-2")

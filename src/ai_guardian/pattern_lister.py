@@ -8,10 +8,12 @@ Shows built-in pattern counts and configurable keys users can set in ai-guardian
 
 import json
 import logging
+import re as re_mod
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from ai_guardian.config_utils import get_cache_dir
 from ai_guardian.patterns import BUNDLED_FILES
 from ai_guardian.patterns.toml_parser import load_toml_file
 
@@ -48,9 +50,40 @@ CATEGORY_ALIASES = {
     "config_scan": "config_file_scanning",
     "secrets": "secret_redaction",
     "redaction": "secret_redaction",
+    "poisoning": "context_poisoning",
+    "supply": "supply_chain",
     "logging": "violation_logging",
     "violations": "violation_logging",
 }
+
+
+TESTABLE_MATCH_TYPES = {"regex", "literal"}
+
+
+def test_rule_matches(rule: "DetectionRule", text: str) -> bool:
+    """Test whether a rule's pattern matches the given text."""
+    if rule.match_type not in TESTABLE_MATCH_TYPES:
+        return False
+    try:
+        if rule.match_type == "regex":
+            return bool(re_mod.search(rule.pattern, text, re_mod.IGNORECASE))
+        if rule.match_type == "literal":
+            return rule.pattern.lower() in text.lower()
+    except re_mod.error:
+        return False
+    return False
+
+
+@dataclass
+class DetectionRule:
+    id: str
+    pattern: str
+    match_type: str
+    source: str
+    category: str
+    group: str
+    description: str
+    severity: str
 
 
 @dataclass
@@ -81,6 +114,15 @@ class PatternCategory:
     @property
     def total_built_in(self) -> int:
         return sum(g.count for g in self.built_in_groups)
+
+
+_CACHE_FILE_INFO = {
+    "patterns.toml": ("secrets", "gitleaks"),
+    "ssrf-patterns.toml": ("ssrf", "ssrf"),
+    "unicode-patterns.toml": ("unicode", "unicode"),
+    "config-exfil-patterns.toml": ("config_exfil", "config-exfil"),
+    "secrets-patterns.toml": ("secrets", "secrets"),
+}
 
 
 class PatternLister:
@@ -297,6 +339,30 @@ class PatternLister:
             configurable_keys=configurable,
         )
 
+    def _build_context_poisoning_category(self) -> PatternCategory:
+        groups = [
+            BuiltInGroup("Persistence patterns", _count_toml_rules("context_poisoning", group="persistence"), "permanent instruction injection"),
+            BuiltInGroup("Dangerous action patterns", _count_toml_rules("context_poisoning", group="dangerous_action"), "risky automated actions"),
+        ]
+
+        return PatternCategory(
+            name="Context Poisoning",
+            config_key="context_poisoning",
+            built_in_groups=groups,
+        )
+
+    def _build_supply_chain_category(self) -> PatternCategory:
+        groups = [
+            BuiltInGroup("Download & execute", _count_toml_rules("supply_chain", group="download_and_execute"), "curl|sh, wget|sh chains"),
+            BuiltInGroup("Malicious imports", _count_toml_rules("supply_chain", group="malicious_imports"), "suspicious pip/npm installs"),
+        ]
+
+        return PatternCategory(
+            name="Supply Chain",
+            config_key="supply_chain",
+            built_in_groups=groups,
+        )
+
     def _build_violation_logging_category(self) -> PatternCategory:
         schema = self._load_schema()
         schema_section = schema.get("properties", {}).get("violation_logging", {})
@@ -321,6 +387,8 @@ class PatternLister:
             self._build_ssrf_category,
             self._build_config_scanning_category,
             self._build_secret_redaction_category,
+            self._build_context_poisoning_category,
+            self._build_supply_chain_category,
             self._build_violation_logging_category,
         ]
 
@@ -338,6 +406,113 @@ class PatternLister:
                 categories.append(cat)
 
         return categories
+
+    def _extract_pattern_text(self, rule: Dict[str, Any]) -> str:
+        for key in ("regex", "cidr", "source", "glob"):
+            if key in rule:
+                return str(rule[key])
+        return rule.get("id", "")
+
+    def _load_pattern_server_rules(
+        self, bundled_ids: set, category_filter: Optional[str] = None
+    ) -> List[DetectionRule]:
+        """Load rules from pattern server cache files (no network calls)."""
+        rules: List[DetectionRule] = []
+        try:
+            cache_dir = get_cache_dir()
+        except Exception:
+            return rules
+
+        if not cache_dir.exists():
+            return rules
+
+        for filename, (cat_key, engine_type) in _CACHE_FILE_INFO.items():
+            if category_filter and cat_key != category_filter:
+                continue
+            cache_path = cache_dir / filename
+            if not cache_path.exists():
+                continue
+            try:
+                raw_rules = load_toml_file(cache_path)
+            except Exception:
+                logger.debug("Failed to parse pattern server cache %s", cache_path)
+                continue
+            source_label = f"server:{engine_type}"
+            for raw in raw_rules:
+                rule_id = raw.get("id", "")
+                if rule_id in bundled_ids:
+                    continue
+                pattern = self._extract_pattern_text(raw)
+                match_type = raw.get("match_type", "")
+                if not match_type and "regex" in raw:
+                    match_type = "regex"
+                if not match_type:
+                    match_type = "regex"
+                group = raw.get("group", raw.get("category", ""))
+                if not group:
+                    tags = raw.get("tags", [])
+                    if tags:
+                        group = ", ".join(tags[:2])
+                rules.append(DetectionRule(
+                    id=rule_id,
+                    pattern=pattern,
+                    match_type=match_type,
+                    source=source_label,
+                    category=cat_key,
+                    group=group,
+                    description=raw.get("description", ""),
+                    severity=raw.get("tier", raw.get("severity", "")),
+                ))
+
+        return rules
+
+    def get_all_rules(self, category_filter: Optional[str] = None) -> List[DetectionRule]:
+        """Return all detection rules from TOML files, pattern server cache, and hardcoded patterns."""
+        rules: List[DetectionRule] = []
+
+        for cat_key, toml_path in BUNDLED_FILES.items():
+            if category_filter and cat_key != category_filter:
+                continue
+            if not toml_path.exists():
+                continue
+            try:
+                raw_rules = load_toml_file(toml_path)
+            except Exception:
+                continue
+            for raw in raw_rules:
+                rules.append(DetectionRule(
+                    id=raw.get("id", ""),
+                    pattern=self._extract_pattern_text(raw),
+                    match_type=raw.get("match_type", "regex"),
+                    source="toml",
+                    category=cat_key,
+                    group=raw.get("group", raw.get("category", "")),
+                    description=raw.get("description", ""),
+                    severity=raw.get("tier", raw.get("severity", "")),
+                ))
+
+        bundled_ids = {r.id for r in rules}
+        rules.extend(self._load_pattern_server_rules(bundled_ids, category_filter))
+
+        if not category_filter or category_filter == "self_protection":
+            try:
+                from ai_guardian.tool_policy import IMMUTABLE_DENY_PATTERNS
+                for tool_name, patterns in IMMUTABLE_DENY_PATTERNS.items():
+                    for i, pat in enumerate(patterns):
+                        rules.append(DetectionRule(
+                            id=f"self-protect-{tool_name.lower()}-{i+1:03d}",
+                            pattern=pat,
+                            match_type="fnmatch",
+                            source="hardcoded",
+                            category="self_protection",
+                            group=tool_name,
+                            description=f"Self-protection: blocks {tool_name} on matching paths",
+                            severity="immutable",
+                        ))
+            except ImportError:
+                pass
+
+        return rules
 
     def print_pattern_list(self, verbose: bool = False, category: Optional[str] = None):
         categories = self.get_categories(category_filter=category)

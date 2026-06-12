@@ -72,6 +72,8 @@ from ai_guardian.config_loaders import (
     _load_annotations_config,
     _load_image_scanning_config,
     _load_security_instructions_config,
+    _load_context_poisoning_config,
+    _load_supply_chain_config,
     _get_on_scan_error_action,
 )
 
@@ -81,6 +83,7 @@ from ai_guardian.response_format import (
     format_response,
 )
 from ai_guardian.hook_adapters import detect_adapter
+from ai_guardian.latency_logger import _CheckTimer
 
 # Conditional imports for optional features
 try:
@@ -108,10 +111,22 @@ except ImportError:
     HAS_PROMPT_INJECTION = False
 
 try:
-    from ai_guardian.config_scanner import check_config_file_threats
+    from ai_guardian.context_poisoning import ContextPoisoningDetector
+    HAS_CONTEXT_POISONING = True
+except ImportError:
+    HAS_CONTEXT_POISONING = False
+
+try:
+    from ai_guardian.config_scanner import check_config_file_threats, check_bash_command_threats
     HAS_CONFIG_SCANNER = True
 except ImportError:
     HAS_CONFIG_SCANNER = False
+
+try:
+    from ai_guardian.supply_chain import SupplyChainScanner
+    HAS_SUPPLY_CHAIN = True
+except ImportError:
+    HAS_SUPPLY_CHAIN = False
 
 try:
     from ai_guardian.violation_logger import ViolationLogger
@@ -147,6 +162,31 @@ except ImportError:
     HAS_AST_SCANNER = False
 
 logger = logging.getLogger(__name__)
+
+
+def _is_latency_enabled():
+    try:
+        from ai_guardian.latency_logger import LatencyLogger
+        return LatencyLogger()._is_enabled()
+    except Exception:
+        return False
+
+
+def _finalize_latency(timer, hook_event, tool_name):
+    if timer is None or not timer._enabled:
+        return
+    try:
+        from ai_guardian.latency_logger import LatencyLogger
+        LatencyLogger().log_timing({
+            "timestamp": datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
+            "hook_event": hook_event.value if hasattr(hook_event, 'value') else str(hook_event or ""),
+            "tool": tool_name or "",
+            "total_ms": round(timer.total_ms(), 2),
+            "checks": {k: round(v, 2) for k, v in timer.to_dict().items()},
+        })
+    except Exception:
+        pass
+
 
 DEFAULT_ENGINES = ["toml-patterns", "gitleaks"]
 
@@ -867,6 +907,51 @@ def _save_transcript_positions(positions: Dict[str, int]) -> None:
         logging.debug(f"Failed to save transcript positions: {e}")
 
 
+def _handle_session_end(hook_data, daemon_state, session_id, adapter):
+    """Handle true session end (SessionEnd event) with cleanup.
+
+    Performs best-effort cleanup actions:
+    1. Advance transcript position to EOF
+    2. Clean up hook contexts for this session
+    3. Remove session from security injection tracking
+    4. Log session summary
+
+    All steps are fail-open: errors are logged but never raised.
+
+    Returns:
+        dict: Empty allow response (exit_code 0)
+    """
+    session_label = (session_id[:16] + "...") if session_id and len(session_id) > 16 else (session_id or "unknown")
+    adapter_name = adapter.name if adapter else "unknown"
+    logging.info(f"Session ended for {session_label} (adapter: {adapter_name})")
+
+    contexts_cleaned = 0
+
+    try:
+        _advance_transcript_position(hook_data)
+    except Exception as e:
+        logging.debug(f"Session end: transcript position advance failed (non-fatal): {e}")
+
+    try:
+        from ai_guardian.hook_context import HookContextManager
+        context_mgr = HookContextManager(session_id=session_id, daemon_state=daemon_state)
+        contexts_cleaned = context_mgr.cleanup_session()
+    except Exception as e:
+        logging.debug(f"Session end: hook context cleanup failed (non-fatal): {e}")
+
+    try:
+        from ai_guardian.session_state import SessionStateManager, derive_session_key
+        session_key = derive_session_key(hook_data)
+        state_mgr = SessionStateManager(daemon_state=daemon_state)
+        state_mgr.cleanup_session(session_key)
+    except Exception as e:
+        logging.debug(f"Session end: session state cleanup failed (non-fatal): {e}")
+
+    logging.info(f"Session cleanup complete: {contexts_cleaned} contexts removed")
+
+    return {"output": None, "exit_code": 0}
+
+
 def _advance_transcript_position(hook_data: dict) -> None:
     """Advance transcript position to current file size after PostToolUse.
 
@@ -1374,13 +1459,14 @@ def _log_transcript_violation(
         logging.debug(f"Failed to log transcript violation: {e}")
 
 
-def _scan_for_pii(text, pii_config):
+def _scan_for_pii(text, pii_config, file_path=None):
     """
     Scan text for PII using SecretRedactor with PII patterns.
 
     Args:
         text: Text to scan
         pii_config: PII config dict with enabled, pii_types, action
+        file_path: Optional file path for inclusion in warning message
 
     Returns:
         tuple: (has_pii, redacted_text, redactions, warning_message)
@@ -1392,14 +1478,42 @@ def _scan_for_pii(text, pii_config):
         result = redactor.redact(text)
         redactions = result.get('redactions', [])
         if redactions:
-            pii_types_found = sorted(set(r['type'] for r in redactions))
+            # Group redactions by type, collecting line numbers
+            type_lines = {}
+            for r in redactions:
+                rtype = r['type']
+                line_num = r.get('line_number')
+                if rtype not in type_lines:
+                    type_lines[rtype] = []
+                if line_num is not None:
+                    type_lines[rtype].append(line_num)
+
+            # Build per-type display with line numbers
+            display_items = []
+            for rtype in sorted(type_lines.keys()):
+                lines = sorted(set(type_lines[rtype]))
+                if lines:
+                    if len(lines) <= 3:
+                        line_info = ", ".join(str(ln) for ln in lines)
+                    else:
+                        line_info = ", ".join(str(ln) for ln in lines[:3]) + ", ..."
+                    display_items.append(f"  - {rtype} (line {line_info})")
+                else:
+                    display_items.append(f"  - {rtype}")
+
+            file_info = ""
+            if file_path:
+                display_path = file_path if len(file_path) <= 100 else "..." + file_path[-97:]
+                file_info = f"File: {display_path}\n"
+
             warning = (
                 f"\n{'='*70}\n"
                 f"🔒 PII DETECTED\n"
                 f"{'='*70}\n"
-                f"Found {len(redactions)} PII item(s):\n"
-                + "\n".join([f"  - {r['type']}" for r in redactions[:10]])
-                + ("\n  - ..." if len(redactions) > 10 else "")
+                + file_info
+                + f"Found {len(redactions)} PII item(s):\n"
+                + "\n".join(display_items[:10])
+                + ("\n  - ..." if len(display_items) > 10 else "")
                 + f"\n\nAction: {pii_config.get('action', 'block')}\n"
                 + f"{'='*70}\n"
             )
@@ -1660,6 +1774,34 @@ def _log_directory_blocking_violation(file_path: str, denied_directory: str, is_
         logger.debug(f"Failed to log directory blocking violation: {e}")
 
 
+def _build_violation_context(context, hook_context):
+    """Build standard violation context dict from context and hook_context."""
+    ctx = context or {}
+    hctx = hook_context or {}
+    violation_ctx = {
+        "ide_type": ctx.get("ide_type", "unknown"),
+        "hook_event": ctx.get("hook_event", "unknown"),
+        "project_path": os.getcwd()
+    }
+    if hctx.get("tool_use_id"):
+        violation_ctx["tool_use_id"] = hctx["tool_use_id"]
+    if hctx.get("session_id"):
+        violation_ctx["session_id"] = hctx["session_id"]
+    return violation_ctx
+
+
+def _enrich_blocked_from_details(blocked_info, details):
+    """Add line_number, end_line, total_findings, validation from scan details."""
+    if details.get("line_number"):
+        blocked_info["line_number"] = details["line_number"]
+        if details.get("end_line") and details["end_line"] != details["line_number"]:
+            blocked_info["end_line"] = details["end_line"]
+    if details.get("total_findings"):
+        blocked_info["total_findings"] = details["total_findings"]
+    if details.get("validation"):
+        blocked_info["validation"] = details["validation"]
+
+
 def _log_secret_detection_violation(filename: str, context: Optional[Dict] = None, secret_details: Optional[Dict] = None,
                                     hook_context: Optional[Dict] = None, violation_logger=None):
     """
@@ -1675,44 +1817,22 @@ def _log_secret_detection_violation(filename: str, context: Optional[Dict] = Non
         return
 
     try:
-        ctx = context or {}
         details = secret_details or {}
-        hctx = hook_context or {}
-
-        # Build blocked info with detailed location if available
+        engine_name = details.get("engine", "Gitleaks")
         blocked_info = {
             "file_path": filename if filename != "user_prompt" else None,
             "source": "prompt" if filename == "user_prompt" else "file",
             "secret_type": details.get("rule_id", "Unknown"),
-            "reason": "Gitleaks detected sensitive information"
+            "reason": f"{engine_name} detected sensitive information"
         }
-
-        # Add line number information if available
-        if details.get("line_number"):
-            blocked_info["line_number"] = details["line_number"]
-            if details.get("end_line") and details["end_line"] != details["line_number"]:
-                blocked_info["end_line"] = details["end_line"]
-
-        # Add total findings count if available
-        if details.get("total_findings"):
-            blocked_info["total_findings"] = details["total_findings"]
-
-        violation_ctx = {
-            "ide_type": ctx.get("ide_type", "unknown"),
-            "hook_event": ctx.get("hook_event", "unknown"),
-            "project_path": os.getcwd()
-        }
-        if hctx.get("tool_use_id"):
-            violation_ctx["tool_use_id"] = hctx["tool_use_id"]
-        if hctx.get("session_id"):
-            violation_ctx["session_id"] = hctx["session_id"]
+        _enrich_blocked_from_details(blocked_info, details)
 
         if violation_logger is None:
             violation_logger = ViolationLogger()
         violation_logger.log_violation(
             violation_type=ViolationType.SECRET_DETECTED,
             blocked=blocked_info,
-            context=violation_ctx,
+            context=_build_violation_context(context, hook_context),
             suggestion={
                 "action": "review_and_remove_secret",
                 "warning": "Secrets should never be committed to code or shared with AI",
@@ -1724,11 +1844,75 @@ def _log_secret_detection_violation(filename: str, context: Optional[Dict] = Non
         logger.debug(f"Failed to log secret detection violation: {e}")
 
 
+# Category → (ViolationType, reason template, severity)
+_CATEGORY_VIOLATION_MAP = {
+    "pii": (ViolationType.PII_DETECTED, "PII detected", "high"),
+    "prompt_injection": (ViolationType.PROMPT_INJECTION, "Prompt injection detected", "high"),
+    "unicode": (ViolationType.PROMPT_INJECTION, "Unicode attack detected", "high"),
+    "config_exfil": (ViolationType.CONFIG_FILE_EXFIL, "Config exfiltration pattern detected", "high"),
+    "ssrf": (ViolationType.SSRF_BLOCKED, "SSRF pattern detected", "high"),
+}
+
+
+def _log_finding_violation(filename: str, context: Optional[Dict] = None,
+                           secret_details: Optional[Dict] = None,
+                           hook_context: Optional[Dict] = None, violation_logger=None):
+    """Route a scanner finding to the correct violation type based on category.
+
+    Checks the 'category' field in secret_details to determine the violation
+    type. Falls back to _log_secret_detection_violation for secrets or unknown
+    categories.
+    """
+    details = secret_details or {}
+    category = details.get("category")
+
+    if category is None or category == "secrets":
+        _log_secret_detection_violation(filename, context, secret_details, hook_context, violation_logger)
+        return
+
+    mapping = _CATEGORY_VIOLATION_MAP.get(category)
+    if mapping is None:
+        _log_secret_detection_violation(filename, context, secret_details, hook_context, violation_logger)
+        return
+
+    if not HAS_VIOLATION_LOGGER:
+        return
+
+    try:
+        vtype, reason_label, severity = mapping
+        engine_name = details.get("engine", "toml-patterns")
+        rule_id = details.get("rule_id", "Unknown")
+
+        blocked_info = {
+            "file_path": filename if filename != "user_prompt" else None,
+            "source": "prompt" if filename == "user_prompt" else "file",
+            "secret_type": rule_id,
+            "reason": f"{engine_name}: {reason_label} ({rule_id})"
+        }
+        _enrich_blocked_from_details(blocked_info, details)
+
+        if violation_logger is None:
+            violation_logger = ViolationLogger()
+        violation_logger.log_violation(
+            violation_type=vtype,
+            blocked=blocked_info,
+            context=_build_violation_context(context, hook_context),
+            suggestion={
+                "action": "review_finding",
+                "false_positive": "Add '# ai-guardian:allow' at the end of the line",
+            },
+            severity=severity
+        )
+    except Exception as e:
+        logger.debug(f"Failed to log finding violation: {e}")
+
+
 def _log_prompt_injection_violation(filename: str, context: Optional[Dict] = None, attack_type: str = "injection",
                                     hook_context: Optional[Dict] = None,
                                     matched_pattern: Optional[str] = None,
                                     matched_text: Optional[str] = None,
                                     confidence: Optional[float] = None,
+                                    line_number: Optional[int] = None,
                                     violation_logger=None):
     """
     Log a prompt injection or jailbreak violation.
@@ -1740,6 +1924,7 @@ def _log_prompt_injection_violation(filename: str, context: Optional[Dict] = Non
         hook_context: Optional dict with tool_use_id, session_id for correlation
         matched_pattern: The regex or pattern name that matched
         matched_text: The text that triggered detection
+        line_number: 1-based line number where the match was found
         confidence: Actual confidence score from the detector
     """
     if not HAS_VIOLATION_LOGGER:
@@ -1747,25 +1932,14 @@ def _log_prompt_injection_violation(filename: str, context: Optional[Dict] = Non
 
     try:
         ctx = context or {}
-        hctx = hook_context or {}
-        if violation_logger is None:
-            violation_logger = ViolationLogger()
         vtype = ViolationType.JAILBREAK_DETECTED if attack_type == "jailbreak" else ViolationType.PROMPT_INJECTION
         reason = "Jailbreak attempt detected" if attack_type == "jailbreak" else "Prompt injection pattern detected"
         full_path = ctx.get("file_path")
         if not full_path and filename != "user_prompt":
             full_path = filename
-        violation_ctx = {
-            "ide_type": ctx.get("ide_type", "unknown"),
-            "hook_event": ctx.get("hook_event", "unknown"),
-            "project_path": os.getcwd()
-        }
-        if hctx.get("tool_use_id"):
-            violation_ctx["tool_use_id"] = hctx["tool_use_id"]
-        if hctx.get("session_id"):
-            violation_ctx["session_id"] = hctx["session_id"]
         blocked_entry = {
             "file_path": full_path,
+            "line_number": line_number,
             "source": "prompt" if filename == "user_prompt" else "file",
             "pattern": matched_pattern or "Unknown",
             "confidence": confidence if confidence is not None else 0.0,
@@ -1774,10 +1948,12 @@ def _log_prompt_injection_violation(filename: str, context: Optional[Dict] = Non
         }
         if matched_text:
             blocked_entry["matched_text"] = matched_text[:100]
+        if violation_logger is None:
+            violation_logger = ViolationLogger()
         violation_logger.log_violation(
             violation_type=vtype,
             blocked=blocked_entry,
-            context=violation_ctx,
+            context=_build_violation_context(context, hook_context),
             suggestion={
                 "action": "add_allowlist_pattern",
                 "note": "If this is legitimate (e.g., documentation), add to allowlist in ai-guardian.json"
@@ -1786,6 +1962,85 @@ def _log_prompt_injection_violation(filename: str, context: Optional[Dict] = Non
         )
     except Exception as e:
         logger.debug(f"Failed to log prompt injection violation: {e}")
+
+
+def _log_context_poisoning_violation(filename: str, context: Optional[Dict] = None,
+                                     hook_context: Optional[Dict] = None,
+                                     matched_pattern: Optional[str] = None,
+                                     matched_text: Optional[str] = None,
+                                     confidence: Optional[float] = None,
+                                     line_number: Optional[int] = None,
+                                     violation_logger=None):
+    """Log a context poisoning violation."""
+    if not HAS_VIOLATION_LOGGER:
+        return
+
+    try:
+        ctx = context or {}
+        blocked_entry = {
+            "file_path": ctx.get("file_path"),
+            "line_number": line_number,
+            "source": "prompt",
+            "pattern": matched_pattern or "Unknown",
+            "confidence": confidence if confidence is not None else 0.0,
+            "method": "heuristic",
+            "reason": "Context poisoning attempt detected"
+        }
+        if matched_text:
+            blocked_entry["matched_text"] = matched_text[:100]
+        if violation_logger is None:
+            violation_logger = ViolationLogger()
+        violation_logger.log_violation(
+            violation_type=ViolationType.CONTEXT_POISONING,
+            blocked=blocked_entry,
+            context=_build_violation_context(context, hook_context),
+            suggestion={
+                "action": "add_allowlist_pattern",
+                "note": "If this is a legitimate persistent instruction, add to context_poisoning.allowlist_patterns in ai-guardian.json"
+            },
+            severity="medium"
+        )
+    except Exception as e:
+        logger.debug(f"Failed to log context poisoning violation: {e}")
+
+
+def _log_supply_chain_violation(filename: str, context: Optional[Dict] = None,
+                                hook_context: Optional[Dict] = None,
+                                matched_pattern: Optional[str] = None,
+                                matched_text: Optional[str] = None,
+                                category: Optional[str] = None,
+                                line_number: Optional[int] = None,
+                                violation_logger=None):
+    """Log a supply chain threat violation."""
+    if not HAS_VIOLATION_LOGGER:
+        return
+
+    try:
+        ctx = context or {}
+        blocked_entry = {
+            "file_path": ctx.get("file_path"),
+            "line_number": line_number,
+            "source": "agent_config",
+            "pattern": matched_pattern or "Unknown",
+            "category": category or "unknown",
+            "reason": "Supply chain threat detected in agent configuration"
+        }
+        if matched_text:
+            blocked_entry["matched_text"] = matched_text[:100]
+        if violation_logger is None:
+            violation_logger = ViolationLogger()
+        violation_logger.log_violation(
+            violation_type=ViolationType.SUPPLY_CHAIN,
+            blocked=blocked_entry,
+            context=_build_violation_context(context, hook_context),
+            suggestion={
+                "action": "add_allowlist_path",
+                "note": "If this is a trusted config file, add to supply_chain.allowlist_paths in ai-guardian.json"
+            },
+            severity="high"
+        )
+    except Exception as e:
+        logger.debug(f"Failed to log supply chain violation: {e}")
 
 
 def _count_gitleaks_patterns(config_path):
@@ -1865,43 +2120,148 @@ def _log_pii_violation(violation_logger, pii_config, pii_redactions,
     return pii_action, pii_types
 
 
+_CATEGORY_BANNER = {
+    "pii": {
+        "title": "PII Detected",
+        "type_label": "PII Type",
+        "why": (
+            "Personally identifiable information (PII) must not be exposed to AI\n"
+            "assistants or committed to version control."
+        ),
+        "recommendations": [
+            "Redact or mask PII before sharing with AI",
+            "Use synthetic/test data instead of real PII",
+            "Review scan_pii settings in ai-guardian.json",
+        ],
+        "footer": "",
+        "protection": "PII Scanning",
+    },
+    "prompt_injection": {
+        "title": "Prompt Injection Detected",
+        "type_label": "Pattern",
+        "why": (
+            "Prompt injection patterns can manipulate AI assistant behavior\n"
+            "and bypass security controls."
+        ),
+        "recommendations": [
+            "Remove or sanitize the injection pattern",
+            "Add to allowlist if this is legitimate documentation",
+        ],
+        "footer": "",
+        "protection": "Prompt Injection Detection",
+    },
+    "unicode": {
+        "title": "Unicode Attack Detected",
+        "type_label": "Pattern",
+        "why": (
+            "Invisible or misleading Unicode characters can be used to obfuscate\n"
+            "malicious content and bypass text-based security checks."
+        ),
+        "recommendations": [
+            "Remove invisible/zero-width characters",
+            "Replace homoglyphs with ASCII equivalents",
+            "Add to allowlist if this is legitimate Unicode content",
+        ],
+        "footer": "",
+        "protection": "Unicode Attack Detection",
+    },
+    "config_exfil": {
+        "title": "Config Exfiltration Detected",
+        "type_label": "Pattern",
+        "why": (
+            "This pattern may exfiltrate configuration data, environment variables,\n"
+            "or credentials to external services."
+        ),
+        "recommendations": [
+            "Review the command for unintended data exposure",
+            "Avoid piping secrets or env vars to external URLs",
+        ],
+        "footer": "",
+        "protection": "Config Exfiltration Detection",
+    },
+    "ssrf": {
+        "title": "SSRF Pattern Detected",
+        "type_label": "Pattern",
+        "why": (
+            "Server-Side Request Forgery (SSRF) patterns target internal networks,\n"
+            "cloud metadata endpoints, or private services."
+        ),
+        "recommendations": [
+            "Avoid requests to internal/private IP ranges",
+            "Do not access cloud metadata endpoints",
+            "Use allowlisted URLs only",
+        ],
+        "footer": "",
+        "protection": "SSRF Protection",
+    },
+}
+
+
 def _build_secret_detected_message(scanner_name, secret_details, pattern_description,
                                    protection_label="Secret Scanning"):
-    """Build a consistent 'Secret Detected' error banner."""
+    """Build a category-aware detection error banner."""
+    category = secret_details.get("category") if secret_details else None
+    banner = _CATEGORY_BANNER.get(category) if category else None
+
+    if banner:
+        title = banner["title"]
+        type_label = banner["type_label"]
+        why_text = banner["why"]
+        recommendations = banner["recommendations"]
+        footer_text = banner["footer"]
+        if protection_label == "Secret Scanning":
+            protection_label = banner["protection"]
+    else:
+        title = "Secret Detected"
+        type_label = "Secret Type"
+        why_text = (
+            "Hard-coded secrets in source code can leak to version control\n"
+            "and be accessed by unauthorized users."
+        )
+        recommendations = [
+            "Move secrets to environment variables",
+            "Use secret management (AWS Secrets Manager, HashiCorp Vault)",
+            "Add to .gitignore if in config file",
+            "Never commit secrets to git",
+        ]
+        footer_text = "⚠️  Secret value NOT shown in this message for security\n"
+
     error_msg = (
         f"\n{'='*70}\n"
-        f"🛡️ Secret Detected\n"
+        f"🛡️ {title}\n"
         f"{'='*70}\n\n"
         f"Protection: {protection_label}\n"
     )
 
     if secret_details:
-        error_msg += f"Secret Type: {secret_details['rule_id']}\n"
+        from ai_guardian.secret_type_names import get_secret_type_display
+        display_name = get_secret_type_display(secret_details['rule_id'])
+        error_msg += f"{type_label}: {display_name}\n"
         if secret_details.get('line_number'):
             error_msg += f"Location: {secret_details['file']}:{secret_details['line_number']}\n"
         else:
             error_msg += f"Location: {secret_details['file']}\n"
     else:
-        error_msg += "Secret Type: (multiple or unknown)\n"
+        error_msg += f"{type_label}: (multiple or unknown)\n"
 
     error_msg += f"Scanner: {scanner_name}\n"
     error_msg += f"Patterns: {pattern_description}\n"
 
     error_msg += (
-        f"\nWhy blocked: Hard-coded secrets in source code can leak to version control\n"
-        f"and be accessed by unauthorized users.\n\n"
+        f"\nWhy blocked: {why_text}\n\n"
         f"This operation has been blocked for security.\n"
-        f"Please remove the sensitive information and try again.\n\n"
-        f"DO NOT attempt to bypass this protection - it prevents credential leaks.\n\n"
+        f"Please remove the flagged content and try again.\n\n"
+        f"DO NOT attempt to bypass this protection.\n\n"
         f"Recommendation:\n"
-        f"  • Move secrets to environment variables\n"
-        f"  • Use secret management (AWS Secrets Manager, HashiCorp Vault)\n"
-        f"  • Add to .gitignore if in config file\n"
-        f"  • Never commit secrets to git\n\n"
-        f"⚠️  Secret value NOT shown in this message for security\n\n"
     )
+    for rec in recommendations:
+        error_msg += f"  • {rec}\n"
+    error_msg += "\n"
 
-    if not secret_details:
+    if footer_text:
+        error_msg += f"{footer_text}\n"
+
+    if not secret_details and not banner:
         error_msg += (
             "Common secret types:\n"
             "  • API keys and tokens\n"
@@ -1934,6 +2294,144 @@ def _describe_patterns(engine_config, resolved_config_path, config_source, patte
         return f"{resolved_config_path}"
 
     return f"Built-in {engine_type} rules"
+
+
+def _apply_secret_validation(
+    secret_config: Optional[Dict],
+    secrets_info: list,
+    content: str,
+    context: Optional[Dict] = None,
+) -> Optional[Dict]:
+    """Apply secret liveness validation if enabled (Issue #971, #983).
+
+    Called after detection + allowlist filtering, before the block decision.
+    Validates detected secrets against provider APIs to check if they're
+    still active.
+
+    Args:
+        secret_config: Secret scanning config dict (may contain validate_secrets, etc.)
+        secrets_info: List of secret dicts with at least 'rule_id' and 'line_number'.
+                      May also contain 'secret' or 'matched_text'.
+        content: Full scanned content (for extracting secret values by line number).
+        context: Optional context dict for logging.
+
+    Returns:
+        None  — validation disabled or not applicable, no validation field in violation
+        dict  — {"skip_block": bool, "validation_info": {"status": ..., "message": ..., "elapsed_ms": ...}}
+    """
+    if not secret_config or not secret_config.get("validate_secrets", False):
+        return None  # Validation not enabled
+
+    if not secrets_info:
+        return None
+
+    try:
+        from ai_guardian.scanners.secret_validator import SecretValidator, ValidationStatus
+
+        validator = SecretValidator(config=secret_config)
+        if not validator.enabled:
+            return None
+
+        # Check if any secrets have validators
+        has_any_validator = any(validator.has_validator(s.get("rule_id", "")) for s in secrets_info)
+        if not has_any_validator:
+            return {
+                "skip_block": False,
+                "validation_info": {
+                    "status": "unverified",
+                    "message": "No validator for this rule",
+                    "elapsed_ms": 0,
+                },
+            }
+
+        results = validator.validate_secrets(secrets_info, content)
+        active_secrets, inactive_secrets = validator.filter_inactive(secrets_info, results)
+
+        # Build validation_info from first result (matches primary secret in violation)
+        primary_result = results[0] if results else None
+
+        if not active_secrets and inactive_secrets:
+            # All secrets are inactive — log and skip blocking
+            on_inactive = validator.on_inactive
+            for result in results:
+                if result.status == ValidationStatus.INACTIVE:
+                    if on_inactive == "warn":
+                        logging.warning(
+                            f"Secret '{result.rule_id}' is inactive (revoked/expired): "
+                            f"{result.message} [{result.elapsed_ms:.0f}ms]"
+                        )
+                    else:
+                        logging.info(
+                            f"Secret '{result.rule_id}' is inactive: {result.message}"
+                        )
+            logging.info(
+                f"All {len(inactive_secrets)} detected secret(s) validated as inactive — "
+                f"skipping block (on_inactive={on_inactive})"
+            )
+            return {
+                "skip_block": True,
+                "validation_info": {
+                    "status": primary_result.status.value if primary_result else "inactive",
+                    "message": primary_result.message if primary_result else "",
+                    "elapsed_ms": primary_result.elapsed_ms if primary_result else 0,
+                },
+            }
+
+        # At least one secret is active or unverified — block
+        for result in results:
+            if result.status == ValidationStatus.VERIFIED:
+                logging.warning(
+                    f"Secret '{result.rule_id}' VERIFIED ACTIVE "
+                    f"[{result.elapsed_ms:.0f}ms]"
+                )
+            elif result.status == ValidationStatus.INACTIVE:
+                logging.info(
+                    f"Secret '{result.rule_id}' inactive but other secrets "
+                    f"still active — blocking all"
+                )
+
+        # Use first active/verified result for validation_info, fall back to primary
+        active_result = next(
+            (r for r in results if r.status == ValidationStatus.VERIFIED), primary_result
+        )
+        return {
+            "skip_block": False,
+            "validation_info": {
+                "status": active_result.status.value if active_result else "unverified",
+                "message": active_result.message if active_result else "",
+                "elapsed_ms": active_result.elapsed_ms if active_result else 0,
+            },
+        }
+
+    except ImportError:
+        logging.debug("Secret validator module not available — skipping validation")
+        return None
+    except Exception as e:
+        logging.warning(f"Secret validation error (fail-closed): {e}")
+        return {
+            "skip_block": False,
+            "validation_info": {
+                "status": "error",
+                "message": str(e),
+                "elapsed_ms": 0,
+            },
+        }
+
+
+def _run_secret_validation(secret_config, secrets_list, content, context):
+    """Run secret liveness validation and return (validation_info, should_skip).
+
+    Shared helper for the 4 code paths in check_secrets_with_gitleaks that
+    perform secret validation after detection.
+    """
+    validation_result = _apply_secret_validation(
+        secret_config, secrets_list,
+        content if isinstance(content, str) else str(content),
+        context=context,
+    )
+    validation_info = validation_result.get("validation_info") if validation_result else None
+    should_skip = bool(validation_result and validation_result.get("skip_block"))
+    return validation_info, should_skip
 
 
 def check_secrets_with_gitleaks(content, filename="temp_file", context: Optional[Dict] = None,
@@ -2098,13 +2596,13 @@ def check_secrets_with_gitleaks(content, filename="temp_file", context: Optional
                     consensus_threshold = scanner_config.get("consensus_threshold", 2) if scanner_config else 2
 
                     # Select first available engine (logs warnings for unavailable ones)
-                    engine_config = select_engine(engines_list)
+                    engine_config = select_engine(engines_list, parent_config=scanner_config)
 
                     # For first-match strategy, get all available engines for fallthrough
                     _all_available_engines = None
                     if execution_strategy_name == "first-match" and len(engines_list) > 1:
                         try:
-                            _all_available_engines = select_all_engines(engines_list)
+                            _all_available_engines = select_all_engines(engines_list, parent_config=scanner_config)
                         except RuntimeError:
                             pass  # Only primary engine available
 
@@ -2173,7 +2671,7 @@ def check_secrets_with_gitleaks(content, filename="temp_file", context: Optional
             if (execution_strategy_name in ("first-match", "any-match", "consensus")
                     and HAS_SCANNER_ENGINE and not gitleaks_config_path):
                 try:
-                    all_engines = select_all_engines(engines_list)
+                    all_engines = select_all_engines(engines_list, parent_config=scanner_config)
                     strategy_kwargs = {}
                     if execution_strategy_name == "consensus":
                         strategy_kwargs["threshold"] = consensus_threshold
@@ -2225,6 +2723,15 @@ def check_secrets_with_gitleaks(content, filename="temp_file", context: Optional
                                 logging.info("All strategy findings matched .gitleaks.toml allowlist — skipping")
                                 return False, None
 
+                        # Secret liveness validation (Issue #971, #983)
+                        secrets_for_validation = [
+                            {"rule_id": s.rule_id, "line_number": s.line_number, "secret": s.secret}
+                            for s in strategy_result.secrets
+                        ]
+                        validation_info, should_skip = _run_secret_validation(
+                            secret_config, secrets_for_validation, content, context,
+                        )
+
                         first_secret = strategy_result.secrets[0]
                         secret_details = {
                             "rule_id": first_secret.rule_id,
@@ -2232,8 +2739,18 @@ def check_secrets_with_gitleaks(content, filename="temp_file", context: Optional
                             "line_number": first_secret.line_number,
                             "end_line": first_secret.end_line or 0,
                             "commit": first_secret.commit or "N/A",
-                            "total_findings": len(strategy_result.secrets)
+                            "total_findings": len(strategy_result.secrets),
+                            "engine": strategy_result.engine,
+                            "category": first_secret.category,
                         }
+                        if validation_info:
+                            secret_details["validation"] = validation_info
+
+                        if should_skip:
+                            _log_finding_violation(file_path or filename, context, secret_details,
+                                                   hook_context=context)
+                            logging.info("All secrets validated as inactive (strategy path) — allowing")
+                            return False, None
 
                         scanner_name = strategy_result.engine
                         error_msg = _build_secret_detected_message(
@@ -2242,8 +2759,8 @@ def check_secrets_with_gitleaks(content, filename="temp_file", context: Optional
                             f"Secret Scanning ({execution_strategy_name} strategy)",
                         )
 
-                        _log_secret_detection_violation(file_path or filename, context, secret_details,
-                                                        hook_context=context)
+                        _log_finding_violation(file_path or filename, context, secret_details,
+                                               hook_context=context)
                         logging.error(f"Secret detected ({execution_strategy_name}): {first_secret.rule_id}")
                         return True, error_msg
 
@@ -2327,12 +2844,12 @@ def check_secrets_with_gitleaks(content, filename="temp_file", context: Optional
                     scanner_config = secret_config if secret_config else (_load_secret_scanning_config()[0])
                     engines_list = scanner_config.get("engines", DEFAULT_ENGINES) if scanner_config else DEFAULT_ENGINES
                     execution_strategy_name = scanner_config.get("execution_strategy", "first-match") if scanner_config else "first-match"
-                    engine_config = select_engine(engines_list)
+                    engine_config = select_engine(engines_list, parent_config=scanner_config)
 
                     # For first-match: get all engines for fallthrough (Issue #523)
                     if execution_strategy_name == "first-match" and len(engines_list) > 1:
                         try:
-                            _all_available_engines = select_all_engines(engines_list)
+                            _all_available_engines = select_all_engines(engines_list, parent_config=scanner_config)
                         except RuntimeError:
                             pass
                 except RuntimeError as e:
@@ -2482,6 +2999,15 @@ def check_secrets_with_gitleaks(content, filename="temp_file", context: Optional
                                 context={"filename": filename}
                             )
                             if fallback_result.has_secrets and fallback_result.secrets:
+                                # Secret liveness validation (Issue #971, #983) — fallthrough path 1
+                                fb_secrets = [
+                                    {"rule_id": s.rule_id, "line_number": s.line_number, "secret": s.secret}
+                                    for s in fallback_result.secrets
+                                ]
+                                fb_validation_info, fb_should_skip = _run_secret_validation(
+                                    secret_config, fb_secrets, content, context,
+                                )
+
                                 first_secret = fallback_result.secrets[0]
                                 secret_details = {
                                     "rule_id": first_secret.rule_id,
@@ -2489,16 +3015,27 @@ def check_secrets_with_gitleaks(content, filename="temp_file", context: Optional
                                     "line_number": first_secret.line_number,
                                     "end_line": first_secret.end_line or 0,
                                     "commit": first_secret.commit or "N/A",
-                                    "total_findings": len(fallback_result.secrets)
+                                    "total_findings": len(fallback_result.secrets),
+                                    "engine": fallback_result.engine,
+                                    "category": first_secret.category,
                                 }
+                                if fb_validation_info:
+                                    secret_details["validation"] = fb_validation_info
+
+                                if fb_should_skip:
+                                    _log_finding_violation(file_path or filename, context, secret_details,
+                                                           hook_context=context)
+                                    logging.info("All secrets validated as inactive (fallthrough 1) — allowing")
+                                    return False, None
+
                                 scanner_name = fallback_result.engine
                                 error_msg = _build_secret_detected_message(
                                     scanner_name, secret_details,
                                     "Built-in Defaults",
                                     "Secret Scanning (first-match fallthrough)",
                                 )
-                                _log_secret_detection_violation(file_path or filename, context, secret_details,
-                                                                hook_context=context)
+                                _log_finding_violation(file_path or filename, context, secret_details,
+                                                       hook_context=context)
                                 logging.error(f"Secret detected (first-match fallthrough): {first_secret.rule_id}")
                                 return True, error_msg
                     return False, None
@@ -2558,6 +3095,26 @@ def check_secrets_with_gitleaks(content, filename="temp_file", context: Optional
                 if secret_details:
                     secret_details['file'] = file_path or filename
 
+                # Secret liveness validation (Issue #971, #983) — legacy subprocess path
+                if secret_details:
+                    secrets_for_validation = [secret_details]
+                    if scan_result and scan_result.get("findings"):
+                        secrets_for_validation = scan_result["findings"]
+                    legacy_validation_info, legacy_should_skip = _run_secret_validation(
+                        secret_config, secrets_for_validation, content, context,
+                    )
+                    if legacy_validation_info:
+                        secret_details["validation"] = legacy_validation_info
+
+                    if legacy_should_skip:
+                        scanner_name = engine_config.type if engine_config else "Gitleaks"
+                        if secret_details is not None:
+                            secret_details.setdefault("engine", scanner_name)
+                        _log_finding_violation(file_path or filename, context, secret_details,
+                                               hook_context=context)
+                        logging.info("All secrets validated as inactive (legacy path) — allowing")
+                        return False, None
+
                 # Build error message with details if available
                 scanner_name = engine_config.type if engine_config else "Gitleaks"
                 pattern_config_for_msg = pattern_config if HAS_PATTERN_SERVER else None
@@ -2566,11 +3123,14 @@ def check_secrets_with_gitleaks(content, filename="temp_file", context: Optional
                     _describe_patterns(engine_config, resolved_config_path, config_source, pattern_config_for_msg),
                 )
 
-                # Log secret detection violation with details
-                _log_secret_detection_violation(file_path or filename, context, secret_details,
-                                                hook_context=context)
+                # Log violation with category-aware routing (Issue #984)
+                if secret_details is not None:
+                    secret_details.setdefault("engine", scanner_name)
+                _log_finding_violation(file_path or filename, context, secret_details,
+                                       hook_context=context)
 
                 # Always block - secret scanning does not support "log" mode
+                # (unless validation confirmed all secrets are inactive - Issue #971)
                 # Rationale: Allowing secrets through (even in audit mode) creates security risk:
                 #   - UserPromptSubmit: secrets reach Claude's API
                 #   - PostToolUse: secrets in tool outputs go to Claude's session
@@ -2600,6 +3160,15 @@ def check_secrets_with_gitleaks(content, filename="temp_file", context: Optional
                             context={"filename": filename}
                         )
                         if fallback_result.has_secrets and fallback_result.secrets:
+                            # Secret liveness validation (Issue #971, #983) — fallthrough path 2
+                            fb2_secrets = [
+                                {"rule_id": s.rule_id, "line_number": s.line_number, "secret": s.secret}
+                                for s in fallback_result.secrets
+                            ]
+                            fb2_validation_info, fb2_should_skip = _run_secret_validation(
+                                secret_config, fb2_secrets, content, context,
+                            )
+
                             first_secret = fallback_result.secrets[0]
                             secret_details = {
                                 "rule_id": first_secret.rule_id,
@@ -2607,8 +3176,19 @@ def check_secrets_with_gitleaks(content, filename="temp_file", context: Optional
                                 "line_number": first_secret.line_number,
                                 "end_line": first_secret.end_line or 0,
                                 "commit": first_secret.commit or "N/A",
-                                "total_findings": len(fallback_result.secrets)
+                                "total_findings": len(fallback_result.secrets),
+                                "engine": fallback_result.engine,
+                                "category": first_secret.category,
                             }
+                            if fb2_validation_info:
+                                secret_details["validation"] = fb2_validation_info
+
+                            if fb2_should_skip:
+                                _log_finding_violation(file_path or filename, context, secret_details,
+                                                        hook_context=context)
+                                logging.info("All secrets validated as inactive (fallthrough 2) — allowing")
+                                return False, None
+
                             scanner_name = fallback_result.engine
                             fallback_engine_config = next(
                                 (e for e in remaining if e.type == scanner_name), None
@@ -2625,8 +3205,8 @@ def check_secrets_with_gitleaks(content, filename="temp_file", context: Optional
                                 fallback_pattern_desc,
                                 "Secret Scanning (first-match fallthrough)",
                             )
-                            _log_secret_detection_violation(file_path or filename, context, secret_details,
-                                                            hook_context=context)
+                            _log_finding_violation(file_path or filename, context, secret_details,
+                                                    hook_context=context)
                             logging.error(f"Secret detected (first-match fallthrough): {first_secret.rule_id}")
                             return True, error_msg
 
@@ -2830,6 +3410,9 @@ def process_hook_data(hook_data, daemon_state=None):
               - For Claude Code: output=None, exit_code=0 (allow) or 2 (block)
               - For Cursor: output=JSON string, exit_code=0
     """
+    _latency_timer = None
+    _latency_event = None
+    _latency_tool = ""
     try:
         now = datetime.now(timezone.utc)
         violation_logger = ViolationLogger() if HAS_VIOLATION_LOGGER else None
@@ -2850,6 +3433,40 @@ def process_hook_data(hook_data, daemon_state=None):
         # Use correlation IDs from normalized input
         hook_tool_use_id = normalized.tool_use_id or hook_data.get("tool_use_id")
         hook_session_id = normalized.session_id or hook_data.get("session_id")
+
+        # Handle session lifecycle events — early return, no scanning
+        if hook_event == HookEvent.SESSION_END:
+            return _handle_session_end(hook_data, daemon_state, hook_session_id, adapter)
+
+        if hook_event == HookEvent.POST_COMPACT:
+            try:
+                from ai_guardian.session_state import SessionStateManager, derive_session_key
+                session_key = derive_session_key(hook_data)
+                state_mgr = SessionStateManager(daemon_state=daemon_state)
+                state_mgr.mark_security_reinject(session_key)
+                logging.info(f"PostCompact: flagged session {session_key[:16]}... for security re-injection")
+            except Exception as e:
+                logging.debug(f"PostCompact: security reinject flag failed (non-fatal): {e}")
+            return {"output": None, "exit_code": 0}
+
+        if hook_event == HookEvent.STOP:
+            return {"output": None, "exit_code": 0}
+
+        _latency_timer = _CheckTimer(enabled=_is_latency_enabled())
+        _latency_event = hook_event
+
+        # Resolve transcript path from adapter defaults (Issue #935)
+        # When hook_data has no transcript_path, agents like Copilot CLI and Codex
+        # have known default locations where JSONL transcripts are stored.
+        # Inject early so _advance_transcript_position (PostToolUse) sees the path too.
+        if not _get_transcript_path(hook_data) and adapter:
+            adapter_default_paths = adapter.get_default_transcript_paths()
+            if adapter_default_paths:
+                hook_data["transcript_path"] = adapter_default_paths[0]
+                logging.debug(
+                    "Resolved transcript path from %s adapter: %s",
+                    adapter.name, adapter_default_paths[0],
+                )
 
         # Create cross-hook context manager for PreToolUse/PostToolUse correlation
         context_mgr = None
@@ -2903,6 +3520,7 @@ def process_hook_data(hook_data, daemon_state=None):
 
             # Extract tool output
             tool_output, tool_name = extract_tool_result(hook_data)
+            _latency_tool = tool_name or ""
             logging.info(f"PostToolUse: tool_name={tool_name}, has_output={tool_output is not None}")
 
             if tool_output is None:
@@ -3029,15 +3647,16 @@ def process_hook_data(hook_data, daemon_state=None):
             else:
                 # Use secret-suppressed content if annotations produced one
                 post_scan_content = post_secret_content if post_secret_content is not None else tool_output
-                has_secrets, error_message = check_secrets_with_gitleaks(
-                    post_scan_content, f"{tool_identifier}_output",
-                    context=post_secret_ctx,
-                    tool_name=tool_identifier,
-                    ignore_files=ignore_files,
-                    ignore_tools=ignore_tools,
-                    allowlist_patterns=secret_allowlist,
-                    secret_config=secret_config
-                )
+                with _latency_timer.check("secret_scanning"):
+                    has_secrets, error_message = check_secrets_with_gitleaks(
+                        post_scan_content, f"{tool_identifier}_output",
+                        context=post_secret_ctx,
+                        tool_name=tool_identifier,
+                        ignore_files=ignore_files,
+                        ignore_tools=ignore_tools,
+                        allowlist_patterns=secret_allowlist,
+                        secret_config=secret_config
+                    )
 
             if not has_secrets and error_message:
                 # Scanner not available - display warning but allow operation
@@ -3078,7 +3697,8 @@ def process_hook_data(hook_data, daemon_state=None):
                         pii_config_for_redactor, _ = _load_pii_config()
                         pii_cfg = pii_config_for_redactor if pii_config_for_redactor and pii_config_for_redactor.get('enabled', True) else None
                         redactor = SecretRedactor(redaction_config, pii_config=pii_cfg)
-                        result = redactor.redact(tool_output)
+                        with _latency_timer.check("secret_redaction"):
+                            result = redactor.redact(tool_output)
 
                         redacted_text = result['redacted_text']
                         redactions = result['redactions']
@@ -3202,7 +3822,8 @@ def process_hook_data(hook_data, daemon_state=None):
 
                 if not pii_skip_scan:
                     logging.info("Scanning tool output for PII...")
-                    has_pii, redacted_text, pii_redactions, pii_warning = _scan_for_pii(tool_output, pii_config)
+                    with _latency_timer.check("pii_detection"):
+                        has_pii, redacted_text, pii_redactions, pii_warning = _scan_for_pii(tool_output, pii_config, file_path=pii_file_path)
 
                     # Scan error with on_scan_error=block: block without logging a false violation (#507)
                     if has_pii and not pii_redactions:
@@ -3284,6 +3905,7 @@ def process_hook_data(hook_data, daemon_state=None):
         ):
             tool_name = normalized.tool_name
             tool_input = normalized.tool_input
+            _latency_tool = tool_name or ""
 
             # Normalize mcp: prefix to mcp__ format (agent-agnostic)
             if tool_name and tool_name.startswith("mcp:"):
@@ -3316,7 +3938,8 @@ def process_hook_data(hook_data, daemon_state=None):
                     default=True
                 ):
                     policy_checker = ToolPolicyChecker()
-                    is_allowed, error_message, checked_tool_name = policy_checker.check_tool_allowed(hook_data)
+                    with _latency_timer.check("permissions"):
+                        is_allowed, error_message, checked_tool_name = policy_checker.check_tool_allowed(hook_data)
 
                     if not is_allowed:
                         # Extract reason summary for logging
@@ -3383,13 +4006,72 @@ def process_hook_data(hook_data, daemon_state=None):
             # PreToolUse or beforeReadFile hook
             logging.info(f"Processing {hook_event} hook...")
 
+            # Bash command exfiltration detection (Issue #1100)
+            # Check Bash commands for credential exfiltration patterns before execution
+            if hook_event == HookEvent.PRE_TOOL_USE and tool_name == "Bash" and HAS_CONFIG_SCANNER:
+                bash_command = tool_input.get("command", "") if tool_input else ""
+                if bash_command:
+                    scanner_config, config_error = _load_config_scanner_config()
+                    if config_error:
+                        logging.warning(f"Config scanner config error: {config_error}")
+
+                    if scanner_config and is_feature_enabled(
+                        scanner_config.get("enabled"),
+                        now,
+                        default=True
+                    ):
+                        logging.info("Checking Bash command for exfiltration patterns...")
+                        with _latency_timer.check("bash_command_exfil_check"):
+                            should_block, exfil_error, exfil_details = check_bash_command_threats(
+                                bash_command, scanner_config
+                            )
+
+                        if should_block:
+                            # Credential exfiltration detected in Bash command - block operation
+                            logging.warning(f"🚨 BLOCKED: Credential exfiltration detected in Bash command")
+
+                            # Log config exfiltration violation
+                            if violation_logger:
+                                try:
+                                    exfil_ctx = {
+                                        "pattern_name": exfil_details.get("pattern_name", "unknown") if exfil_details else "unknown",
+                                        "pattern_description": exfil_details.get("pattern_description", "") if exfil_details else "",
+                                        "command": bash_command[:500],
+                                        "matched_text": exfil_details.get("matched_text", "") if exfil_details else "",
+                                    }
+                                    violation_logger.log_violation(
+                                        hook_name="PreToolUse",
+                                        tool_identifier=f"Bash: {bash_command[:100]}",
+                                        violation_type=ViolationType.CONFIG_FILE_EXFIL,
+                                        pattern_name=exfil_ctx["pattern_name"],
+                                        action=ActionMode.BLOCK,
+                                        context=exfil_ctx,
+                                        hook_session_id=hook_session_id,
+                                        hook_tool_use_id=hook_tool_use_id,
+                                    )
+                                except Exception as e:
+                                    logging.warning(f"Failed to log bash exfil violation: {e}")
+
+                            combined_warning = "\n\n".join(warning_messages) if warning_messages else None
+                            result = format_response(
+                                ide_type,
+                                has_secrets=True,
+                                error_message=exfil_error,
+                                hook_event=hook_event,
+                                warning_message=combined_warning,
+                                violation_type=ViolationType.CONFIG_FILE_EXFIL,
+                                security_message=security_message
+                            )
+                            return result
+
             # Only extract file content for file-reading tools
             # Bash, Write, Edit, etc. don't read files in PreToolUse - they have command/content parameters
             # Bug #94: Bash commands were incorrectly treated as file paths
             # Bug #174: Glob removed - uses 'pattern' parameter, not 'file_path', doesn't read content in PreToolUse
             if tool_name in FILE_READING_TOOLS or hook_event == HookEvent.BEFORE_READ_FILE:
                 # Extract file content for tools that read files
-                content_to_scan, filename, file_path, is_denied, deny_reason, dir_warning = extract_file_content_from_tool(hook_data)
+                with _latency_timer.check("directory_rules"):
+                    content_to_scan, filename, file_path, is_denied, deny_reason, dir_warning = extract_file_content_from_tool(hook_data)
 
                 # Check if directory access is denied
                 if is_denied:
@@ -3448,7 +4130,8 @@ def process_hook_data(hook_data, daemon_state=None):
                                 with open(file_path, 'rb') as f:
                                     image_data = f.read()
 
-                                image_scan_result = scan_image(image_data, img_config)
+                                with _latency_timer.check("image_scanning"):
+                                    image_scan_result = scan_image(image_data, img_config)
                                 logging.info(
                                     f"OCR extracted {len(image_scan_result.extracted_text)} chars "
                                     f"in {image_scan_result.elapsed_ms:.0f}ms"
@@ -3597,7 +4280,8 @@ def process_hook_data(hook_data, daemon_state=None):
                     ):
                         try:
                             for img_bytes in image_bytes_list:
-                                img_result = scan_image(img_bytes, img_config)
+                                with _latency_timer.check("image_scanning"):
+                                    img_result = scan_image(img_bytes, img_config)
                                 if img_result.extracted_text:
                                     content_to_scan = f"{content_to_scan}\n{img_result.extracted_text}"
                                     logging.info(f"OCR extracted {len(img_result.extracted_text)} chars from prompt image")
@@ -3630,9 +4314,10 @@ def process_hook_data(hook_data, daemon_state=None):
                     source_type = "user_prompt" if hook_event == HookEvent.PROMPT else "file_content"
 
                     detector = PromptInjectionDetector(injection_config)
-                    should_block, injection_error, injection_detected = detector.detect(
-                        content_to_scan, file_path=file_path, tool_name=tool_identifier, source_type=source_type
-                    )
+                    with _latency_timer.check("prompt_injection"):
+                        should_block, injection_error, injection_detected = detector.detect(
+                            content_to_scan, file_path=file_path, tool_name=tool_identifier, source_type=source_type
+                        )
 
                     # Log violation if injection was detected (in both log and block modes)
                     if injection_detected:
@@ -3648,7 +4333,8 @@ def process_hook_data(hook_data, daemon_state=None):
                             hook_context=inj_hook_ctx if inj_hook_ctx else None,
                             matched_pattern=detector.last_matched_pattern,
                             matched_text=detector.last_matched_text,
-                            confidence=detector.last_confidence
+                            confidence=detector.last_confidence,
+                            line_number=detector.last_line_number
                         )
 
                     if should_block:
@@ -3683,6 +4369,103 @@ def process_hook_data(hook_data, daemon_state=None):
                                           violation_type=ViolationType.PROMPT_INJECTION, security_message=security_message)
                 logging.warning(f"Prompt injection check error (fail-open): {e}")
 
+        # Check for context poisoning (LLM03) — only on user prompts
+        if HAS_CONTEXT_POISONING and hook_event == HookEvent.PROMPT and content_to_scan:
+            try:
+                cp_config, cp_error = _load_context_poisoning_config()
+                if cp_error:
+                    warning_messages.append(cp_error)
+
+                if cp_config and is_feature_enabled(
+                    cp_config.get("enabled"),
+                    now,
+                    default=True
+                ):
+                    cp_detector = ContextPoisoningDetector(cp_config)
+                    with _latency_timer.check("context_poisoning"):
+                        cp_should_block, cp_error_msg, cp_detected = cp_detector.detect(content_to_scan)
+
+                    if cp_detected:
+                        cp_hook_ctx = {}
+                        if hook_tool_use_id:
+                            cp_hook_ctx["tool_use_id"] = hook_tool_use_id
+                        if hook_session_id:
+                            cp_hook_ctx["session_id"] = hook_session_id
+                        _log_context_poisoning_violation(
+                            filename,
+                            context={"ide_type": ide_type.value, "hook_event": hook_event, "file_path": file_path},
+                            hook_context=cp_hook_ctx if cp_hook_ctx else None,
+                            matched_pattern=cp_detector.last_matched_pattern,
+                            matched_text=cp_detector.last_matched_text,
+                            confidence=cp_detector.last_confidence,
+                            line_number=cp_detector.last_line_number
+                        )
+
+                    if cp_should_block:
+                        logging.info("Blocking operation due to context poisoning detection")
+                        combined_warning = "\n\n".join(warning_messages) if warning_messages else None
+                        result = format_response(ide_type, has_secrets=True, error_message=cp_error_msg, hook_event=hook_event, warning_message=combined_warning, violation_type=ViolationType.CONTEXT_POISONING, security_message=security_message)
+                        return result
+                    elif cp_detected and cp_error_msg:
+                        warning_messages.append(cp_error_msg)
+
+            except Exception as e:
+                logging.warning(f"Context poisoning check error (fail-open): {e}")
+
+        # Check for supply chain threats in agent configuration files
+        # Skip on UserPromptSubmit — users legitimately discuss curl install
+        # commands, paste docs, and debug curl issues (see #1114)
+        if HAS_SUPPLY_CHAIN and content_to_scan and hook_event != HookEvent.PROMPT:
+            try:
+                sc_config, sc_error = _load_supply_chain_config()
+                if sc_error:
+                    warning_messages.append(sc_error)
+
+                if sc_config and is_feature_enabled(
+                    sc_config.get("enabled"),
+                    now,
+                    default=True
+                ):
+                    sc_scanner = SupplyChainScanner(sc_config)
+                    sc_file_path = file_path or filename or "user_prompt"
+
+                    with _latency_timer.check("supply_chain"):
+                        if hook_event == HookEvent.PROMPT:
+                            sc_should_block, sc_error_msg, sc_detected = sc_scanner.scan_content(
+                                content_to_scan, label="user_prompt"
+                            )
+                        else:
+                            sc_should_block, sc_error_msg, sc_detected = sc_scanner.scan(
+                                sc_file_path, content_to_scan
+                            )
+
+                    if sc_detected:
+                        sc_hook_ctx = {}
+                        if hook_tool_use_id:
+                            sc_hook_ctx["tool_use_id"] = hook_tool_use_id
+                        if hook_session_id:
+                            sc_hook_ctx["session_id"] = hook_session_id
+                        _log_supply_chain_violation(
+                            filename,
+                            context={"ide_type": ide_type.value, "hook_event": hook_event, "file_path": sc_file_path},
+                            hook_context=sc_hook_ctx if sc_hook_ctx else None,
+                            matched_pattern=sc_scanner.last_matched_pattern,
+                            matched_text=sc_scanner.last_matched_text,
+                            category=sc_scanner.last_category,
+                            line_number=sc_scanner.last_line_number
+                        )
+
+                    if sc_should_block:
+                        logging.info("Blocking operation due to supply chain threat detection")
+                        combined_warning = "\n\n".join(warning_messages) if warning_messages else None
+                        result = format_response(ide_type, has_secrets=True, error_message=sc_error_msg, hook_event=hook_event, warning_message=combined_warning, violation_type=ViolationType.SUPPLY_CHAIN, security_message=security_message)
+                        return result
+                    elif sc_detected and sc_error_msg:
+                        warning_messages.append(sc_error_msg)
+
+            except Exception as e:
+                logging.warning(f"Supply chain check error (fail-open): {e}")
+
         # Check for config file threats (credential exfiltration patterns in AI config files)
         # Only scan for PreToolUse/Read operations on actual files
         logger.debug(f"Config scanner check: HAS_CONFIG_SCANNER={HAS_CONFIG_SCANNER}, hook_event={hook_event}, file_path={file_path}, has_content={content_to_scan is not None}")
@@ -3702,9 +4485,10 @@ def process_hook_data(hook_data, daemon_state=None):
                 )
 
                 if is_enabled:
-                    should_block, config_error, config_details = check_config_file_threats(
-                        file_path, content_to_scan, scanner_config
-                    )
+                    with _latency_timer.check("config_file_scanning"):
+                        should_block, config_error, config_details = check_config_file_threats(
+                            file_path, content_to_scan, scanner_config
+                        )
 
                     if should_block:
                         # Config file threat detected - block operation
@@ -3789,16 +4573,17 @@ def process_hook_data(hook_data, daemon_state=None):
                 pre_secret_ctx["session_id"] = hook_session_id
             # Use secret-suppressed content if annotation processing produced one
             secret_scan_content = secret_content_to_scan if secret_content_to_scan is not None else content_to_scan
-            has_secrets, error_message = check_secrets_with_gitleaks(
-                secret_scan_content, filename,
-                context=pre_secret_ctx,
-                file_path=file_path,
-                tool_name=tool_identifier,
-                ignore_files=ignore_files,
-                ignore_tools=ignore_tools,
-                allowlist_patterns=secret_allowlist,
-                secret_config=secret_config
-            )
+            with _latency_timer.check("secret_scanning"):
+                has_secrets, error_message = check_secrets_with_gitleaks(
+                    secret_scan_content, filename,
+                    context=pre_secret_ctx,
+                    file_path=file_path,
+                    tool_name=tool_identifier,
+                    ignore_files=ignore_files,
+                    ignore_tools=ignore_tools,
+                    allowlist_patterns=secret_allowlist,
+                    secret_config=secret_config
+                )
 
             if not has_secrets and error_message:
                 # Scanner not available - add warning to messages list
@@ -3838,7 +4623,8 @@ def process_hook_data(hook_data, daemon_state=None):
                 if should_scan_pii:
                     logging.info(f"Scanning {'prompt' if hook_event == HookEvent.PROMPT else filename} for PII...")
                     pii_scan_content = pii_content_to_scan if pii_content_to_scan is not None else content_to_scan
-                    has_pii, _, pii_redactions, pii_warning = _scan_for_pii(pii_scan_content, pii_config)
+                    with _latency_timer.check("pii_detection"):
+                        has_pii, _, pii_redactions, pii_warning = _scan_for_pii(pii_scan_content, pii_config, file_path=file_path)
 
                     # Scan error with on_scan_error=block: block without logging a false violation (#507)
                     if has_pii and not pii_redactions:
@@ -3874,11 +4660,20 @@ def process_hook_data(hook_data, daemon_state=None):
                         else:
                             logging.warning(f"Unknown PII action '{pii_action}', allowing through")
 
-        # Transcript scanning for secrets and PII (Issue #430, #442)
+        # Transcript scanning for secrets and PII (Issue #430, #442, #935)
         # Detects threats that entered the transcript via ! shell commands (which bypass hooks)
         # Prompt injection scanning intentionally excluded — too many false positives in conversation context
+        #
+        # transcript_path may already be injected into hook_data by adapter defaults
+        # resolution above (Issue #935). Build the list of paths to scan:
+        # - IDE-provided path (from hook_data), OR
+        # - All adapter-default paths (Codex may have multiple session files)
         transcript_path = _get_transcript_path(hook_data)
-        if transcript_path and hook_event == HookEvent.PROMPT:
+        transcript_paths_to_scan = [transcript_path] if transcript_path else []
+        if not transcript_paths_to_scan and adapter:
+            transcript_paths_to_scan = adapter.get_default_transcript_paths()
+
+        if transcript_paths_to_scan and hook_event == HookEvent.PROMPT:
             try:
                 ts_config, ts_error = _load_transcript_scanning_config()
                 if ts_error:
@@ -3901,17 +4696,19 @@ def process_hook_data(hook_data, daemon_state=None):
                     except NameError:
                         ts_pii_config, _ = _load_pii_config()
 
-                    transcript_warnings = scan_transcript_incremental(
-                        transcript_path,
-                        secret_config=ts_secret_config,
-                        pii_config=ts_pii_config,
-                        hook_context={"session_id": hook_session_id} if hook_session_id else None
-                    )
-                    if transcript_warnings:
-                        warning_messages.extend(transcript_warnings)
-                        logging.warning(f"Transcript scanning found {len(transcript_warnings)} issue(s)")
-                    else:
-                        logging.info("✓ No threats detected in transcript")
+                    for ts_path in transcript_paths_to_scan:
+                        with _latency_timer.check("transcript_scanning"):
+                            transcript_warnings = scan_transcript_incremental(
+                                ts_path,
+                                secret_config=ts_secret_config,
+                                pii_config=ts_pii_config,
+                                hook_context={"session_id": hook_session_id} if hook_session_id else None
+                            )
+                        if transcript_warnings:
+                            warning_messages.extend(transcript_warnings)
+                            logging.warning(f"Transcript scanning found {len(transcript_warnings)} issue(s) in {ts_path}")
+                        else:
+                            logging.info(f"✓ No threats detected in transcript: {ts_path}")
                 elif ts_config and ide_type != IDEType.CURSOR:
                     logging.info("⚠️  Transcript scanning temporarily disabled")
             except Exception as e:
@@ -4038,6 +4835,8 @@ def process_hook_data(hook_data, daemon_state=None):
             pass
         # Fail-open: allow operation on errors
         return {"output": None, "exit_code": 0}
+    finally:
+        _finalize_latency(_latency_timer, _latency_event, _latency_tool)
 
 
 def process_hook_input():

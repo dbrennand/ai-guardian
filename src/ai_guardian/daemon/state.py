@@ -73,6 +73,9 @@ class DaemonState:
         self._paused = False
         self._paused_until = 0.0  # monotonic timestamp, 0 = not time-limited
 
+        # Per-directory pause (#958)
+        self._paused_dirs = {}  # project_dir -> monotonic timestamp (0 = indefinite)
+
         # Config reload tracking (#610)
         self._last_config_reload_at = None  # unix timestamp
         self._on_config_reloaded = None  # optional callback
@@ -98,6 +101,12 @@ class DaemonState:
 
         # MCP installed detection (#756)
         self._mcp_installed = self._check_mcp_installed()
+
+        # ML engine manager (#185) — lazy-loaded on first ml_detect request
+        self._ml_engine_manager = None
+        self._ml_load_attempted = False
+        self._ml_load_error = None
+        self._ml_load_event = threading.Event()
 
         # Initial config load
         self._reload_config()
@@ -168,6 +177,38 @@ class DaemonState:
             if expired:
                 logger.debug(f"Cleaned up {len(expired)} expired hook contexts")
         self._cleanup_stale_project_configs()
+
+    def cleanup_session_contexts(self, session_id):
+        """Remove all hook contexts for a specific session.
+
+        Called on session end to clean up accumulated PreToolUse contexts.
+
+        Returns:
+            int: Number of contexts removed
+        """
+        if not session_id:
+            return 0
+        prefix = f"{session_id}:"
+        with self._lock:
+            keys_to_remove = [k for k in self._hook_contexts if k.startswith(prefix)]
+            for key in keys_to_remove:
+                del self._hook_contexts[key]
+            if keys_to_remove:
+                logger.debug(f"Cleaned up {len(keys_to_remove)} contexts for session {session_id[:16]}...")
+            return len(keys_to_remove)
+
+    def cleanup_session_state(self, session_key):
+        """Remove a session from security injection tracking.
+
+        Called on session end to finalize session state.
+        """
+        if not session_key:
+            return
+        with self._lock:
+            self._security_injected_sessions.discard(session_key)
+            self._security_reinject_sessions.discard(session_key)
+            self._session_last_activity.pop(session_key, None)
+        self._schedule_persist()
 
     # --- Security injection tracking (#584) ---
 
@@ -512,6 +553,78 @@ class DaemonState:
             remaining = self._paused_until - time.monotonic()
             return max(0.0, remaining)
 
+    # --- Per-directory pause/resume (#958) ---
+
+    def pause_dir(self, directory, duration_minutes=0):
+        """Pause scanning for a specific project directory.
+
+        Args:
+            directory: Absolute path string of the project directory
+            duration_minutes: Pause duration in minutes. 0 = indefinite.
+        """
+        directory = os.path.realpath(directory)
+        with self._lock:
+            if duration_minutes > 0:
+                self._paused_dirs[directory] = (
+                    time.monotonic() + duration_minutes * 60
+                )
+                logger.info(
+                    "Directory paused for %d minutes: %s",
+                    duration_minutes, directory,
+                )
+            else:
+                self._paused_dirs[directory] = 0.0
+                logger.info("Directory paused indefinitely: %s", directory)
+
+    def resume_dir(self, directory):
+        """Resume scanning for a specific project directory.
+
+        Args:
+            directory: Absolute path string of the project directory
+        """
+        directory = os.path.realpath(directory)
+        with self._lock:
+            removed = self._paused_dirs.pop(directory, None)
+            if removed is not None:
+                logger.info("Directory resumed: %s", directory)
+            else:
+                logger.debug("Directory was not paused: %s", directory)
+
+    def is_dir_paused(self, directory):
+        """Check if scanning is paused for a specific directory.
+
+        Handles expiration of time-limited per-directory pauses.
+
+        Args:
+            directory: Absolute path string of the project directory
+
+        Returns:
+            bool: True if the directory is paused
+        """
+        if not directory:
+            return False
+        directory = os.path.realpath(directory)
+        with self._lock:
+            until = self._paused_dirs.get(directory)
+            if until is None:
+                return False
+            if until > 0 and time.monotonic() >= until:
+                del self._paused_dirs[directory]
+                logger.info("Directory pause expired: %s", directory)
+                return False
+            return True
+
+    def get_paused_dirs(self):
+        """Get a snapshot of all paused directories with remaining seconds.
+
+        Expired entries are cleaned up during iteration.
+
+        Returns:
+            dict: {directory: remaining_seconds} where 0 means indefinite
+        """
+        with self._lock:
+            return self._get_paused_dirs_locked()
+
     # --- Stats ---
 
     def get_stats(self):
@@ -565,6 +678,10 @@ class DaemonState:
                 "project_configs_tracked": len(self._project_config_mtimes),
                 "config_error": self._config_error,
                 "mcp_installed": self._mcp_installed,
+                "paused_dirs": self._get_paused_dirs_locked(),
+                "active_project_dirs": list(self._project_dir_last_seen.keys()),
+                "ml_model_loaded": self._ml_engine_manager is not None,
+                "ml_load_error": self._ml_load_error,
             }
 
     @staticmethod
@@ -580,12 +697,124 @@ class DaemonState:
         with self._lock:
             return self._config_error
 
+    # --- ML engine management (#185) ---
+
+    def get_ml_engine_manager(self):
+        """Get or lazily load ML engine manager. Thread-safe.
+
+        Returns:
+            MLEngineManager or None if unavailable
+        """
+        with self._lock:
+            if self._ml_engine_manager is not None:
+                return self._ml_engine_manager
+            if self._ml_load_attempted:
+                # Another thread is loading — wait for it to finish
+                self._lock.release()
+                try:
+                    self._ml_load_event.wait(timeout=60)
+                finally:
+                    self._lock.acquire()
+                return self._ml_engine_manager
+            self._ml_load_attempted = True
+
+        try:
+            from ai_guardian.ml_detection import is_ml_available, MLEngineManager
+            if not is_ml_available():
+                with self._lock:
+                    self._ml_load_error = "ML dependencies not available (onnxruntime required)"
+                return None
+
+            config = self.get_config() or {}
+            pi_config = config.get("prompt_injection", {})
+            engines_config = pi_config.get("ml_engines", [])
+
+            if not engines_config:
+                with self._lock:
+                    self._ml_load_error = "No ml_engines configured in prompt_injection config"
+                return None
+
+            strategy = pi_config.get("ml_strategy", "any-match")
+            consensus_threshold = pi_config.get("consensus_threshold", 2)
+
+            manager = MLEngineManager(
+                engines_config, strategy=strategy,
+                consensus_threshold=consensus_threshold,
+            )
+
+            if not manager.available:
+                with self._lock:
+                    self._ml_load_error = (
+                        "No ML engines loaded: "
+                        + "; ".join(manager.load_errors)
+                    )
+                return None
+
+            with self._lock:
+                self._ml_engine_manager = manager
+                self._ml_load_error = None
+            logger.info(
+                f"ML engine manager loaded: {len(manager.engines)} engines, "
+                f"strategy={strategy}"
+            )
+            return manager
+        except Exception as e:
+            with self._lock:
+                self._ml_load_error = str(e)
+            logger.warning(f"Failed to load ML engine manager: {e}")
+            return None
+        finally:
+            self._ml_load_event.set()
+
+    def reload_ml_engines(self):
+        """Force reload of ML engines (after model download or config change)."""
+        with self._lock:
+            self._ml_engine_manager = None
+            self._ml_load_attempted = False
+            self._ml_load_error = None
+            self._ml_load_event = threading.Event()
+
+    def get_ml_status(self):
+        """Get ML engine status for reporting."""
+        with self._lock:
+            if self._ml_engine_manager is not None:
+                status = self._ml_engine_manager.get_status()
+                status["ml_available"] = True
+                return status
+            return {
+                "ml_available": False,
+                "ml_engines_loaded": 0,
+                "ml_engines_total": 0,
+                "ml_load_error": self._ml_load_error,
+            }
+
     def _pause_remaining_locked(self):
         """Get remaining pause seconds (must be called with lock held)."""
         if not self._paused or self._paused_until <= 0:
             return 0.0
         remaining = self._paused_until - time.monotonic()
         return max(0.0, remaining)
+
+    def _get_paused_dirs_locked(self):
+        """Get paused dirs snapshot (must be called with lock held).
+
+        Returns:
+            dict: {directory: remaining_seconds} where 0 means indefinite.
+                  Expired entries are cleaned up.
+        """
+        now = time.monotonic()
+        result = {}
+        expired = []
+        for d, until in self._paused_dirs.items():
+            if until > 0 and now >= until:
+                expired.append(d)
+            elif until > 0:
+                result[d] = until - now
+            else:
+                result[d] = 0.0
+        for d in expired:
+            del self._paused_dirs[d]
+        return result
 
     # --- Session persistence (#592) ---
 

@@ -75,32 +75,29 @@ EOF
 
 #### Running Tests
 
-**Note**: Tests are only required when making code changes. Documentation-only changes (markdown files, comments) do not require running tests.
+**Note**: Tests are only required when making code changes. Documentation-only changes do not require running tests.
+
+**Run only tests related to your changes** — GitHub Actions runs the full suite on every PR across Python 3.9-3.14 and Windows.
+
+Using [uv](https://docs.astral.sh/uv/) (recommended):
 
 ```bash
-# Install test dependencies
-pip install ai-guardian[dev]
+# Run tests related to your changes
+uv run --extra dev python -m pytest tests/test_<related>.py -v
 
-# Run all tests (required before committing code changes)
-pytest
+# Run tests matching a keyword
+uv run --extra dev python -m pytest -k "test_something" -v
 
-# Run with coverage
-pytest --cov=ai_guardian --cov-report=term-missing
-
-# Run specific test file
-pytest tests/test_specific.py
-
-# Run with verbose output
-pytest -v
+# Run full suite only if needed (CI does this automatically)
+uv run --extra dev python -m pytest
 ```
 
-Or using [uv](https://docs.astral.sh/uv/):
+Or using pip:
 
 ```bash
-uv run --extra dev python -m pytest
-uv run --extra dev python -m pytest --cov=ai_guardian --cov-report=term-missing
-uv run --extra dev python -m pytest tests/test_specific.py
-uv run --extra dev python -m pytest -v
+pip install ai-guardian[dev]
+pytest tests/test_<related>.py -v
+pytest -k "test_something" -v
 ```
 
 #### Test Structure
@@ -185,6 +182,14 @@ def test_user_experience_feature_name(self, mock_pattern_config, mock_scan_confi
 
 ## Common Issues
 
+### AI Guardian Blocking File Reads
+
+If ai-guardian hooks prevent you from reading project files (e.g., `Hook PreToolUse:Read denied this tool`), ask the user to pause ai-guardian temporarily.
+The user can run: `ai-guardian pause 5` (pauses for 5 minutes).
+DO NOT run this command yourself — ai-guardian will block it.
+
+The user can resume protection at any time with `ai-guardian resume`.
+
 ### GitHub Push Protection Blocking Test Secrets
 
 When writing tests that include fake/test secrets (API keys, tokens, etc.), GitHub's secret scanning push protection may block your push even though the secrets are intentionally fake. This is especially common when testing secret detection or redaction features.
@@ -203,13 +208,7 @@ When writing tests that include fake/test secrets (API keys, tokens, etc.), GitH
    - Use obviously fake prefixes where possible
    - Example: For testing general patterns, use `FAKE_sk_test_...` instead of `sk_test_...`
 
-3. **Add explanatory comments**:
-   ```python
-   text = "pk_test_{fake_key_value}"  # notsecret (fake test key)
-   ```
-   Note: Comments like `# notsecret` or `# gitleaks:allow` may not prevent GitHub push protection, but they document intent.
-
-4. **If GitHub still blocks**:
+3. **If GitHub still blocks**:
    - GitHub provides a URL in the error message to allow the specific secret
    - Click the URL and choose "It's used in tests" → "Allow secret"
    - This requires repository admin access
@@ -452,12 +451,20 @@ ai-guardian/
      - **upgrade-from-previous**: Upgrade from previous stable release, permissions migration
      - **multi-agent-setup**: All IDE adapters (claude, cursor, copilot, gemini, codex, windsurf, cline, augment, kiro)
      - **daemon-lifecycle**: Start/status/reload/REST API (health, status, pause, resume)/stop
-     - **detection-end-to-end**: Secrets, PII Phase 1+2, prompt injection, false positive check
+     - **smoke-tests**: Calls `.github/workflows/smoke-tests.yml` (detection scan, hook pipeline, false positives)
      - **config-validation**: Doctor, permissions migration, profiles, config merge (project + user level)
      - **mcp-server**: JSON-RPC initialize and tool call response
    - **⚠️ IMPORTANT**: When adding new CLI commands, config options, IDE adapters, detection patterns, or daemon endpoints, update this workflow to test them. The `/release` skill runs this workflow as a gate before releasing.
 
-5. **Integration Tests** (`.github/workflows/integration-tests.yml`)
+5. **Smoke Tests** (`.github/workflows/smoke-tests.yml`)
+   - Runs on: pull_request to main, workflow_call, workflow_dispatch
+   - Jobs:
+     - **detection-scan**: All violation types via `ai-guardian scan` (secrets, PII Phase 1+2, prompt injection, jailbreak, SSRF, config exfil, context poisoning)
+     - **hook-pipeline**: Hook event processing via `process_hook_data()` (PreToolUse secret deny, PreToolUse directory block, PostToolUse redaction, UserPromptSubmit injection)
+     - **false-positives**: Clean code, env vars, pytest tracebacks produce no findings
+   - Called by release-readiness.yml via `workflow_call`
+
+6. **Integration Tests** (`.github/workflows/integration-tests.yml`)
    - Runs on: schedule (daily 2 AM UTC), workflow_dispatch, pull requests
    - Jobs:
      - **version-check**: Verifies scanner versions exist (runs on all triggers)

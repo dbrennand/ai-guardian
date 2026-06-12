@@ -12,7 +12,9 @@ Scans repository files for security issues using all Phase 1-4 detectors:
 import json
 import logging
 import os
+import re
 import sys
+import tempfile
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Set
 import fnmatch
@@ -26,7 +28,7 @@ except ImportError:
     HAS_SSRF = False
 
 try:
-    from ai_guardian.prompt_injection import UnicodeAttackDetector
+    from ai_guardian.prompt_injection import UnicodeAttackDetector, _offset_to_line_number
     HAS_UNICODE = True
 except ImportError:
     HAS_UNICODE = False
@@ -46,6 +48,7 @@ try:
         create_secret_finding,
         create_pii_finding,
         create_prompt_injection_finding,
+        create_supply_chain_finding,
     )
     HAS_SARIF = True
 except ImportError:
@@ -64,7 +67,7 @@ except ImportError:
     HAS_PII_SCANNER = False
 
 try:
-    from ai_guardian.prompt_injection import check_prompt_injection
+    from ai_guardian.prompt_injection import check_prompt_injection, PromptInjectionDetector
     HAS_PROMPT_INJECTION = True
 except ImportError:
     HAS_PROMPT_INJECTION = False
@@ -75,8 +78,49 @@ try:
 except ImportError:
     HAS_IMAGE_SCANNER = False
 
+try:
+    from ai_guardian.supply_chain import SupplyChainScanner, check_supply_chain_threats
+    HAS_SUPPLY_CHAIN = True
+except ImportError:
+    HAS_SUPPLY_CHAIN = False
+
 
 logger = logging.getLogger(__name__)
+
+
+def _get_line_snippet(content: str, line_number: int, max_length: int = 80) -> Optional[str]:
+    """Extract a single-line snippet from content at the given 1-based line number."""
+    if not content or not line_number or line_number < 1:
+        return None
+    lines = content.split('\n')
+    if line_number > len(lines):
+        return None
+    snippet = lines[line_number - 1].strip()
+    if len(snippet) > max_length:
+        snippet = snippet[:max_length] + "..."
+    return snippet if snippet else None
+
+
+def _parse_position_from_details(details: str) -> Optional[int]:
+    """Extract character position from unicode detector details string."""
+    if not details:
+        return None
+    match = re.search(r'at position (\d+)', details)
+    return int(match.group(1)) if match else None
+
+
+def _find_in_original(content: str, matched_text: Optional[str]) -> Optional[int]:
+    """Find matched_text in original content and return 1-based line number.
+
+    The detector may operate on AST-extracted content, so its line numbers
+    don't map to the original file. Re-locate by searching original lines.
+    """
+    if not content or not matched_text:
+        return None
+    for i, line in enumerate(content.split('\n'), 1):
+        if matched_text in line:
+            return i
+    return None
 
 
 # Config file patterns (from Phase 3)
@@ -201,6 +245,42 @@ class FileScanner:
                     self._scan_image_file(file_path, scan_path)
                 else:
                     self._scan_file(file_path, scan_path)
+
+        return self.findings
+
+    def scan_files(
+        self,
+        file_paths: List[Path],
+        base_path: Optional[Path] = None,
+    ) -> List[Dict[str, Any]]:
+        """Scan a specific list of files for security issues.
+
+        Unlike scan_directory(), this skips file discovery and scans
+        exactly the files provided. Used by diff-based scanning.
+
+        Args:
+            file_paths: List of file paths to scan
+            base_path: Base path for relative path reporting (default: cwd)
+
+        Returns:
+            List of findings
+        """
+        self.findings = []
+        base = base_path or Path.cwd()
+
+        if self.verbose:
+            print(f"Scanning {len(file_paths)} files...")
+
+        for file_path in sorted(file_paths):
+            resolved = Path(file_path).resolve()
+            if not resolved.exists():
+                if self.verbose:
+                    logger.warning(f"File not found, skipping: {file_path}")
+                continue
+            if self._is_scannable_image(resolved):
+                self._scan_image_file(resolved, base)
+            else:
+                self._scan_file(resolved, base)
 
         return self.findings
 
@@ -381,6 +461,10 @@ class FileScanner:
             if HAS_PROMPT_INJECTION:
                 self._check_prompt_injection(relative_path, content)
 
+            # Check for supply chain threats
+            if HAS_SUPPLY_CHAIN:
+                self._check_supply_chain(str(file_path), content)
+
         except Exception as e:
             if self.verbose:
                 logger.error(f"Error scanning {file_path}: {e}")
@@ -501,7 +585,6 @@ class FileScanner:
 
             if should_block:
                 # Extract the problematic URL from the reason or content
-                import re
                 url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
                 urls = re.findall(url_pattern, content)
 
@@ -535,53 +618,31 @@ class FileScanner:
     def _check_unicode_attacks(self, file_path: str, content: str) -> None:
         """Check for Unicode attacks in file content."""
         try:
-            # Check zero-width characters
-            is_attack, details = self.unicode_detector.detect_zero_width(content)
-            if is_attack:
-                finding = create_unicode_finding(
-                    attack_type="zero-width characters",
-                    details=f"Zero-width characters detected: {details}",
-                    file_path=file_path
-                )
-                self.findings.append(finding)
-                if self.verbose:
-                    print(f"  [UNICODE] Zero-width characters detected")
-
-            # Check bidirectional override
-            is_attack, details = self.unicode_detector.detect_bidi_override(content)
-            if is_attack:
-                finding = create_unicode_finding(
-                    attack_type="bidirectional override",
-                    details="Bidirectional override characters detected",
-                    file_path=file_path
-                )
-                self.findings.append(finding)
-                if self.verbose:
-                    print(f"  [UNICODE] Bidirectional override detected")
-
-            # Check homoglyphs
-            is_attack, details = self.unicode_detector.detect_homoglyphs(content)
-            if is_attack:
-                finding = create_unicode_finding(
-                    attack_type="homoglyphs",
-                    details=f"Homoglyph characters detected: {details}",
-                    file_path=file_path
-                )
-                self.findings.append(finding)
-                if self.verbose:
-                    print(f"  [UNICODE] Homoglyphs detected")
-
-            # Check tag characters
-            is_attack, details = self.unicode_detector.detect_tag_chars(content)
-            if is_attack:
-                finding = create_unicode_finding(
-                    attack_type="tag characters",
-                    details=f"Tag characters detected: {details}",
-                    file_path=file_path
-                )
-                self.findings.append(finding)
-                if self.verbose:
-                    print(f"  [UNICODE] Tag characters detected")
+            checks = [
+                ("zero-width characters", self.unicode_detector.detect_zero_width),
+                ("bidirectional override", self.unicode_detector.detect_bidi_override),
+                ("homoglyphs", self.unicode_detector.detect_homoglyphs),
+                ("tag characters", self.unicode_detector.detect_tag_chars),
+            ]
+            for attack_type, detect_fn in checks:
+                is_attack, details = detect_fn(content)
+                if is_attack:
+                    line_number = None
+                    snippet = None
+                    position = _parse_position_from_details(details)
+                    if position is not None:
+                        line_number = _offset_to_line_number(content, position)
+                        snippet = _get_line_snippet(content, line_number)
+                    finding = create_unicode_finding(
+                        attack_type=attack_type,
+                        details=f"{attack_type.title()} detected: {details}",
+                        file_path=file_path,
+                        line_number=line_number,
+                        snippet=snippet,
+                    )
+                    self.findings.append(finding)
+                    if self.verbose:
+                        print(f"  [UNICODE] {attack_type.title()} detected")
 
         except Exception as e:
             logger.debug(f"Error checking Unicode attacks: {e}")
@@ -598,12 +659,23 @@ class FileScanner:
                 filename=os.path.basename(file_path),
                 file_path=absolute_path,
                 allowlist_patterns=secret_config.get("allowlist_patterns"),
+                ignore_files=secret_config.get("ignore_files"),
             )
 
             if has_secrets and error_message:
+                line_number = None
+                secret_type = "secret"
+                if error_message:
+                    loc_match = re.search(r'Location: .*?:(\d+)', error_message)
+                    if loc_match:
+                        line_number = int(loc_match.group(1)) or None
+                    type_match = re.search(r'(?:Secret Type|Credential Type|PII Type): (.+)', error_message)
+                    if type_match:
+                        secret_type = type_match.group(1).strip()
                 finding = create_secret_finding(
-                    secret_type="secret",
+                    secret_type=secret_type,
                     file_path=file_path,
+                    line_number=line_number,
                 )
                 self.findings.append(finding)
                 if self.verbose:
@@ -623,9 +695,16 @@ class FileScanner:
             if has_pii and redactions:
                 pii_types_found = sorted({r.get("type", "unknown") for r in redactions})
                 for pii_type in pii_types_found:
+                    first_of_type = next(
+                        (r for r in redactions if r.get("type") == pii_type), {}
+                    )
+                    line_number = first_of_type.get("line_number")
+                    snippet = _get_line_snippet(content, line_number) if line_number else None
                     finding = create_pii_finding(
                         pii_type=pii_type,
                         file_path=file_path,
+                        line_number=line_number,
+                        snippet=snippet,
                     )
                     self.findings.append(finding)
                 if self.verbose:
@@ -640,23 +719,85 @@ class FileScanner:
             if not injection_config.get("enabled", True):
                 return
 
-            _should_block, error_message, detected = check_prompt_injection(
+            detector = PromptInjectionDetector(injection_config)
+            _should_block, error_message, detected = detector.detect(
                 content,
-                config=injection_config,
                 file_path=file_path,
                 source_type="file_content",
             )
 
             if detected and error_message:
+                line_number = _find_in_original(content, detector.last_matched_text)
+                if line_number is None:
+                    line_number = detector.last_line_number
+                snippet = _get_line_snippet(content, line_number) if line_number else None
                 finding = create_prompt_injection_finding(
                     description=error_message.splitlines()[0] if error_message else "Prompt injection detected",
                     file_path=file_path,
+                    line_number=line_number,
+                    snippet=snippet,
                 )
                 self.findings.append(finding)
                 if self.verbose:
                     print(f"  [PROMPT-INJECTION] {error_message.splitlines()[0] if error_message else 'Detected'}")
         except Exception as e:
             logger.debug(f"Error checking prompt injection: {e}")
+
+    def _check_supply_chain(self, file_path: str, content: str) -> None:
+        """Check agent config files for supply chain threats."""
+        try:
+            sc_config = self.config.get("supply_chain") if self.config else None
+            is_malicious, reason, details = check_supply_chain_threats(
+                file_path, content, sc_config
+            )
+            if is_malicious and details:
+                finding = create_supply_chain_finding(
+                    category=details.get("category", "unknown"),
+                    reason=reason or "Supply chain threat detected",
+                    file_path=file_path,
+                    line_number=details.get("line_number"),
+                    snippet=details.get("snippet"),
+                )
+                self.findings.append(finding)
+                if self.verbose:
+                    print(f"  [SUPPLY-CHAIN] {reason}")
+        except Exception as e:
+            logger.debug(f"Error checking supply chain: {e}")
+
+    def scan_agent_configs(self) -> None:
+        """Scan known agent configuration files for supply chain threats."""
+        import glob as glob_mod
+        from ai_guardian.supply_chain import (
+            AGENT_CONFIG_PATHS_HOME,
+            PLUGIN_PATHS_HOME,
+        )
+
+        home = os.path.expanduser("~")
+        paths_to_scan = []
+
+        for rel_path in AGENT_CONFIG_PATHS_HOME:
+            full = os.path.join(home, rel_path)
+            if "*" in full:
+                paths_to_scan.extend(glob_mod.glob(full))
+            elif os.path.isfile(full):
+                paths_to_scan.append(full)
+
+        for rel_path in PLUGIN_PATHS_HOME:
+            full = os.path.join(home, rel_path)
+            if "*" in full:
+                paths_to_scan.extend(glob_mod.glob(full))
+            elif os.path.isfile(full):
+                paths_to_scan.append(full)
+
+        for fpath in paths_to_scan:
+            try:
+                with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+                if content.strip():
+                    self._check_supply_chain(fpath, content)
+            except Exception as e:
+                if self.verbose:
+                    logger.warning(f"Could not read {fpath}: {e}")
 
 
 def scan_command(args) -> int:
@@ -669,6 +810,12 @@ def scan_command(args) -> int:
     Returns:
         Exit code (0 for success, 1 for issues found)
     """
+    # Suppress internal logging to stderr unless --verbose (file logging unaffected)
+    if not args.verbose:
+        for handler in logging.getLogger().handlers:
+            if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler):
+                handler.setLevel(logging.CRITICAL + 1)
+
     # Load configuration
     config = {}
     if hasattr(args, 'config') and args.config:
@@ -681,13 +828,128 @@ def scan_command(args) -> int:
     # Initialize scanner
     scanner = FileScanner(config=config, verbose=args.verbose)
 
-    # Scan files
-    findings = scanner.scan_directory(
-        path=args.path,
-        include_patterns=args.include if hasattr(args, 'include') else None,
-        exclude_patterns=args.exclude if hasattr(args, 'exclude') else None,
-        config_only=args.config_only if hasattr(args, 'config_only') else False
-    )
+    # Determine scan mode
+    diff_mode = getattr(args, 'diff', False)
+    pr_number = getattr(args, 'pr', None)
+    mr_number = getattr(args, 'mr', None)
+    stdin_diff = getattr(args, 'stdin_diff', False)
+    changed_lines_only = getattr(args, 'changed_lines_only', False)
+    diff_flags = [diff_mode, pr_number is not None, mr_number is not None, stdin_diff]
+
+    if sum(diff_flags) > 1:
+        print("Error: --diff, --pr, --mr, and --stdin-diff are mutually exclusive",
+              file=sys.stderr)
+        return 1
+
+    staged = getattr(args, 'staged', False)
+
+    if getattr(args, 'base', None) and not diff_mode:
+        print("Error: --base requires --diff", file=sys.stderr)
+        return 1
+
+    if staged and not diff_mode:
+        print("Error: --staged requires --diff", file=sys.stderr)
+        return 1
+
+    if staged and getattr(args, 'base', None):
+        print("Error: --staged and --base are mutually exclusive", file=sys.stderr)
+        return 1
+
+    if changed_lines_only and not any(diff_flags):
+        print("Error: --changed-lines-only requires --diff, --pr, --mr, or --stdin-diff",
+              file=sys.stderr)
+        return 1
+
+    agent_configs = getattr(args, 'agent_configs', False)
+    if agent_configs:
+        if not HAS_SUPPLY_CHAIN:
+            print("Error: Supply chain scanner not available", file=sys.stderr)
+            return 1
+        scanner.scan_agent_configs()
+        findings = scanner.findings
+    if not agent_configs and any(diff_flags):
+        # Diff-based scanning
+        try:
+            from ai_guardian.diff_provider import (
+                DiffProviderError,
+                extract_file_contents_from_diff,
+                filter_findings_by_changed_lines,
+                get_changed_files_from_diff,
+                get_diff_unified,
+                get_mr_diff,
+                get_pr_diff,
+                get_staged_diff,
+                parse_unified_diff,
+            )
+        except ImportError as e:
+            print(f"Error: Diff provider not available: {e}", file=sys.stderr)
+            return 1
+
+        try:
+            if stdin_diff:
+                diff_text = sys.stdin.read()
+            elif pr_number:
+                diff_text = get_pr_diff(pr_number, repo_path=args.path)
+            elif mr_number:
+                diff_text = get_mr_diff(mr_number, repo_path=args.path)
+            elif staged:
+                diff_text = get_staged_diff(repo_path=args.path)
+            else:
+                base_ref = getattr(args, 'base', None)
+                diff_text = get_diff_unified(base_ref=base_ref, repo_path=args.path)
+
+            changed_files = get_changed_files_from_diff(diff_text)
+            changed_lines = parse_unified_diff(diff_text) if changed_lines_only else None
+
+            if not changed_files:
+                if not getattr(args, 'sarif_output', None) and not getattr(args, 'json_output', None):
+                    print("No changed files found in diff.")
+                return 0
+
+            is_remote = pr_number is not None or mr_number is not None
+
+            if is_remote:
+                file_contents = extract_file_contents_from_diff(diff_text)
+                tmpdir = tempfile.mkdtemp(prefix="ai-guardian-scan-")
+                try:
+                    tmp_base = Path(tmpdir)
+                    file_paths = []
+                    for rel_path, content in file_contents.items():
+                        tmp_file = tmp_base / rel_path
+                        tmp_file.parent.mkdir(parents=True, exist_ok=True)
+                        tmp_file.write_text(content, encoding="utf-8")
+                        file_paths.append(tmp_file)
+
+                    if args.verbose:
+                        print(f"PR/MR scanning: {len(file_paths)} changed file(s) from remote diff")
+
+                    findings = scanner.scan_files(file_paths=file_paths, base_path=tmp_base)
+                finally:
+                    import shutil
+                    shutil.rmtree(tmpdir, ignore_errors=True)
+            else:
+                base = Path(args.path).resolve()
+                file_paths = [base / f for f in changed_files]
+
+                if args.verbose:
+                    print(f"Diff scanning: {len(file_paths)} changed file(s)")
+
+                findings = scanner.scan_files(file_paths=file_paths, base_path=base)
+
+            if changed_lines_only and changed_lines:
+                findings = filter_findings_by_changed_lines(findings, changed_lines)
+
+        except DiffProviderError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+    elif not agent_configs:
+        # Standard directory scanning
+        findings = scanner.scan_directory(
+            path=args.path,
+            include_patterns=args.include if hasattr(args, 'include') else None,
+            exclude_patterns=args.exclude if hasattr(args, 'exclude') else None,
+            config_only=args.config_only if hasattr(args, 'config_only') else False
+        )
 
     # Output results
     if args.sarif_output and HAS_SARIF:

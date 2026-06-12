@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ai-guardian"
-version = "1.11.0-dev"
+version = "1.12.0-dev"
 description = "AI IDE security hook: blocks directories, scans secrets, and protects AI interactions"
 authors = [{name = "itdove team"}]
 readme = "README.md"
@@ -34,7 +34,10 @@ dependencies = [
   "docker>=7.0,<9",
   "mcp>=1.10.0; python_version >= '3.10'",
   "rapidocr-onnxruntime>=1.4.0; python_version < '3.13'",
+  "onnxruntime>=1.15.0",
   "nicegui>=3.0.0; python_version >= '3.10'",
+  "tokenizers>=0.15.0; python_version >= '3.10'",
+  "boto3>=1.28.0",
 ]
 keywords = ["ai", "security", "claude", "cursor", "secrets", "gitleaks", "hooks"]
 classifiers = [
@@ -54,7 +57,10 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-skill-discovery = []
+tray-linux = [
+  "PyGObject>=3.42.0",
+]
+ml = []
 dev = [
   "pytest>=8.4.2",
 ]

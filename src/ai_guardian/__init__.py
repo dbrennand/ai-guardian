@@ -10,7 +10,7 @@ AI Guardian provides multi-layered protection for AI IDE interactions:
 Automatically detects IDE type and uses appropriate response format.
 """
 
-__version__ = "1.11.0-dev"
+__version__ = "1.12.0-dev"
 
 import logging
 import os
@@ -73,9 +73,12 @@ _suppress_logging = (
     or "mcp-server" in sys.argv
     or ("setup" in sys.argv and "--json" in sys.argv)
 )
+_scan_quiet = ("scan" in sys.argv and "--verbose" not in sys.argv and "-v" not in sys.argv)
 _quiet_stderr = "tray-prompt" in sys.argv or "tray-target-select" in sys.argv
 if _quiet_stderr:
     _stderr_handler.setLevel(logging.CRITICAL)
+    import platform
+elif _scan_quiet:
     import platform
 elif not _suppress_logging:
     logger.info(f"AI Guardian v{__version__} initialized")
@@ -184,6 +187,13 @@ from ai_guardian.cli_handlers import (  # noqa: F401
     _get_client_timeout,
     _set_daemon_mode_in_config,
     _handle_daemon_command,
+)
+
+# --- sdk.py ---
+from ai_guardian.sdk import (  # noqa: F401
+    CheckResult,
+    SecurityViolation,
+    monitor,
 )
 
 # --- cli.py ---

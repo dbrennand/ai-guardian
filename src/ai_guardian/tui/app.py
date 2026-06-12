@@ -94,11 +94,13 @@ NAV_GROUPS = [
     ("Security Overview", [
         ("Security Dashboard", "panel-security-dashboard"),
         ("Global Settings", "panel-global-settings"),
+        ("Health Check", "panel-health-check"),
     ]),
     ("Monitoring", [
         ("Violations", "panel-violations"),
         ("Violation Logging", "panel-violation-logging"),
         ("Metrics & Audit", "panel-metrics"),
+        ("Performance", "panel-performance"),
         ("Logs", "panel-logs"),
     ]),
     ("Permissions", [
@@ -106,6 +108,7 @@ NAV_GROUPS = [
         ("MCP Servers", "panel-mcp"),
         ("MCP Security", "panel-mcp-security"),
         ("Permissions Discovery", "panel-permissions-discovery"),
+        ("Auto Directory Rules", "panel-auto-directory-rules"),
         ("Directory Rules", "panel-directory-rules"),
     ]),
     ("Secrets", [
@@ -115,6 +118,7 @@ NAV_GROUPS = [
     ]),
     ("Prompt Injection", [
         ("Detection Settings", "panel-pi-detection"),
+        ("ML Engines", "panel-pi-ml-engines"),
         ("Patterns", "panel-pi-patterns"),
         ("Jailbreak", "panel-pi-jailbreak"),
         ("Unicode Detection", "panel-pi-unicode"),
@@ -134,11 +138,11 @@ NAV_GROUPS = [
         ("Daemon", "panel-daemon"),
     ]),
     ("Tools", [
+        ("Detection Patterns", "panel-detection-patterns"),
         ("Regex Tester", "panel-regex-tester"),
         ("Hook Simulator", "panel-hook-simulator"),
         ("Engine Tester", "panel-engine-tester"),
         ("Directory Scan", "panel-directory-scan"),
-        ("Health Check", "panel-health-check"),
     ]),
 ]
 
@@ -153,7 +157,9 @@ HELP_DOCS = {
         "  [bold]Security Dashboard[/bold] — At-a-glance status of all "
         "security features with violation analytics\n"
         "  [bold]Global Settings[/bold] — Master toggles for permissions "
-        "enforcement and secret scanning"
+        "enforcement and secret scanning\n"
+        "  [bold]Health Check[/bold] — System health checks "
+        "(ai-guardian doctor) with auto-fix support"
     ),
     "Permissions": (
         "[bold]Permissions[/bold]\n\n"
@@ -229,9 +235,7 @@ HELP_DOCS = {
         "  [bold]Engine Tester[/bold] — Test strings against individual "
         "scanner engines to compare detection results\n"
         "  [bold]Directory Scan[/bold] — Scan directories for security "
-        "issues with interactive results and export\n"
-        "  [bold]Health Check[/bold] — System health checks "
-        "(ai-guardian doctor) with auto-fix support"
+        "issues with interactive results and export"
     ),
     # Panel-level help
     "panel-security-dashboard": (
@@ -316,6 +320,18 @@ HELP_DOCS = {
         "  - Timestamp and frequency\n"
         "  - Quick-add buttons for allow/deny rules"
     ),
+    "panel-auto-directory-rules": (
+        "[bold]Auto Directory Rules[/bold]\n\n"
+        "Auto-generate directory access rules from skill permissions.\n\n"
+        "When enabled, AI Guardian scans standard skill directories for\n"
+        "installed skills and creates directory rules for those matching\n"
+        "your Skill permission allow patterns.\n\n"
+        "[bold]Settings:[/bold]\n"
+        "  [bold]Enabled[/bold]     Toggle auto-generation on/off\n"
+        "  [bold]Symlinks[/bold]    Follow symlinks during skill discovery\n\n"
+        "[bold]Keyboard shortcuts:[/bold]\n"
+        "  [bold]r[/bold]  Refresh discovery results"
+    ),
     "Prompt Injection": (
         "[bold]Prompt Injection[/bold]\n\n"
         "Detect and block prompt injection attacks in tool inputs "
@@ -345,6 +361,21 @@ HELP_DOCS = {
         "  Glob patterns for files and tool names to skip\n\n"
         "[bold]Keyboard shortcuts:[/bold]\n"
         "  [bold]s[/bold]  Save detector/sensitivity settings"
+    ),
+    "panel-pi-ml-engines": (
+        "[bold]ML Prompt Injection Engines[/bold]\n\n"
+        "Configure ML-based prompt injection detection engines.\n\n"
+        "[bold]Settings:[/bold]\n"
+        "  [bold]Strategy[/bold] — first-match, any-match, consensus\n"
+        "  [bold]Fallback[/bold] — heuristic, block, allow\n"
+        "  [bold]Engines[/bold] — JSON array of ML engine configs\n\n"
+        "[bold]Each engine requires:[/bold]\n"
+        "  type: llm-guard\n"
+        "  model: model name from registry\n"
+        "  threshold: 0.0-1.0 (optional, default 0.85)\n\n"
+        "[bold]Keyboard shortcuts:[/bold]\n"
+        "  [bold]Ctrl+S[/bold]  Save engines\n"
+        "  [bold]Ctrl+R[/bold]  Reload from disk"
     ),
     "panel-pi-patterns": (
         "[bold]Allowlist & Custom Patterns[/bold]\n\n"
@@ -558,6 +589,17 @@ HELP_DOCS = {
         "  Use the Export HTML / JSON / CSV buttons, or CLI:\n"
         "  ai-guardian audit --html > report.html"
     ),
+    "panel-performance": (
+        "[bold]Performance — Hook Latency[/bold]\n\n"
+        "Per-hook and per-violation-type timing statistics.\n\n"
+        "[bold]Tables:[/bold]\n"
+        "  [bold]Hook Latency Overview[/bold] — Avg, StdDev, P95 per hook event\n"
+        "  [bold]Per-Check Breakdown[/bold] — Timing per violation check type\n\n"
+        "[bold]Enable:[/bold]\n"
+        "  Set latency_tracking.enabled = true in ai-guardian.json\n\n"
+        "[bold]CLI:[/bold]\n"
+        "  ai-guardian metrics --latency"
+    ),
     "panel-logs": (
         "[bold]Runtime Logs[/bold]\n\n"
         "View AI Guardian's runtime log output for debugging and "
@@ -647,6 +689,22 @@ HELP_DOCS = {
         "and cross-hook state sharing.\n\n"
         "The daemon auto-starts on any CLI command and falls back\n"
         "to direct processing if it cannot start."
+    ),
+    "panel-detection-patterns": (
+        "[bold]Detection Patterns[/bold]\n\n"
+        "Read-only view of ALL detection rules across TOML pattern files "
+        "and hardcoded self-protection patterns.\n\n"
+        "[bold]Features:[/bold]\n"
+        "  - Browse ~360 TOML rules + self-protection globs\n"
+        "  - Filter by category (secrets, pii, prompt_injection, etc.)\n"
+        "  - Search by rule ID, description, or pattern text\n\n"
+        "[bold]Pattern sources:[/bold]\n"
+        "  - TOML: secrets, pii, prompt-injection, unicode, ssrf,\n"
+        "    config-exfil, context-poisoning, supply-chain\n"
+        "  - Hardcoded: self-protection patterns (Write, Edit, Read, Bash)\n\n"
+        "[bold]Controls:[/bold]\n"
+        "  Use the category buttons to filter by type.\n"
+        "  Use the search box to find specific rules."
     ),
     "panel-regex-tester": (
         "[bold]Regex Tester[/bold]\n\n"
@@ -808,6 +866,8 @@ class AIGuardianTUI(App):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        from ai_guardian import __version__
+        self.title = f"AI Guardian v{__version__}"
         self._input_original_values = {}
         self.initial_panel = None
         self.config_scope = "global"
@@ -1012,7 +1072,8 @@ class AIGuardianTUI(App):
         yield Header()
 
         with Horizontal(id="main-layout"):
-            tree: Tree[str] = Tree("AI Guardian", id="nav-tree")
+            from ai_guardian import __version__
+            tree: Tree[str] = Tree(f"AI Guardian v{__version__}", id="nav-tree")
             tree.root.expand()
             for group_label, items in NAV_GROUPS:
                 group_node = tree.root.add(group_label)
@@ -1046,9 +1107,17 @@ class AIGuardianTUI(App):
                     from ai_guardian.tui.permissions_discovery import PermissionsDiscoveryContent
                     yield PermissionsDiscoveryContent()
 
+                with Container(id="panel-auto-directory-rules"):
+                    from ai_guardian.tui.auto_directory_rules import AutoDirectoryRulesContent
+                    yield AutoDirectoryRulesContent()
+
                 with Container(id="panel-pi-detection"):
                     from ai_guardian.tui.pi_detection import PIDetectionContent
                     yield PIDetectionContent()
+
+                with Container(id="panel-pi-ml-engines"):
+                    from ai_guardian.tui.pi_ml_engines import PIMLEnginesContent
+                    yield PIMLEnginesContent()
 
                 with Container(id="panel-pi-patterns"):
                     from ai_guardian.tui.pi_patterns import PIPatternsContent
@@ -1102,6 +1171,10 @@ class AIGuardianTUI(App):
                     from ai_guardian.tui.metrics_panel import MetricsContent
                     yield MetricsContent()
 
+                with Container(id="panel-performance"):
+                    from ai_guardian.tui.performance import PerformanceContent
+                    yield PerformanceContent()
+
                 with Container(id="panel-logs"):
                     from ai_guardian.tui.logs import LogsContent
                     yield LogsContent()
@@ -1133,6 +1206,10 @@ class AIGuardianTUI(App):
                 with Container(id="panel-daemon"):
                     from ai_guardian.tui.daemon_panel import DaemonPanelContent
                     yield DaemonPanelContent()
+
+                with Container(id="panel-detection-patterns"):
+                    from ai_guardian.tui.detection_patterns import DetectionPatternsContent
+                    yield DetectionPatternsContent()
 
                 with Container(id="panel-regex-tester"):
                     from ai_guardian.tui.regex_tester import RegexTesterContent

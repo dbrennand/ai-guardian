@@ -14,11 +14,11 @@ from ai_guardian.patterns.toml_parser import load_and_compile, load_toml_file
 PATTERNS_DIR = DATA_DIR
 
 EXPECTED_COUNTS = {
-    "secrets.toml": 44,
+    "secrets.toml": 53,
     "pii.toml": 13,
     "prompt-injection.toml": 73,
     "unicode.toml": 107,
-    "config-exfil.toml": 8,
+    "config-exfil.toml": 10,  # Updated for Issue #1100: added curl @file patterns
     "ssrf.toml": 22,
 }
 

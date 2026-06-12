@@ -84,6 +84,44 @@ def _remove_tray_lock():
     except (ValueError, OSError):
         pass
 
+def _ensure_system_gi():
+    """Make system GObject Introspection visible in isolated environments.
+
+    uv tool install creates an isolated Python env that can't see system
+    site-packages. Detect system gi location via the system Python and
+    add its parent directory to sys.path so pystray can use AppIndicator.
+    """
+    import platform
+    if platform.system() != "Linux":
+        return
+    try:
+        import gi  # noqa: F401
+        return
+    except ImportError:
+        pass
+    for python in ("/usr/bin/python3", "/usr/bin/python", "python3", "python"):
+        try:
+            result = subprocess.run(
+                [python, "-c",
+                 "import gi; import os; print(os.path.dirname(gi.__path__[0]))"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                site_dir = result.stdout.strip()
+                if site_dir not in sys.path:
+                    sys.path.insert(0, site_dir)
+                    try:
+                        import gi  # noqa: F401
+                        logger.info("System gi found at %s", site_dir)
+                        return
+                    except ImportError:
+                        sys.path.remove(site_dir)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+
+
+_ensure_system_gi()
+
 try:
     import pystray
     from PIL import Image, ImageDraw
@@ -120,6 +158,19 @@ def _restore_stderr(saved_fd):
             pass
 
 
+def _check_gi_available():
+    """Check if GObject Introspection is available (required for tray on Linux).
+
+    Without gi, pystray falls back from AppIndicator3 to the Xorg backend
+    which crashes on Wayland sessions.
+    """
+    try:
+        import gi  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
 def is_tray_available():
     """Check if system tray can be displayed (dependencies + display)."""
     if not HAS_PYSTRAY:
@@ -129,8 +180,16 @@ def is_tray_available():
     if os.environ.get("DISPLAY") is None and os.environ.get("WAYLAND_DISPLAY") is None:
         if platform.system() == "Linux":
             return False
-    if platform.system() == "Linux" and not _check_gnome_appindicator():
-        return False
+    if platform.system() == "Linux":
+        if not _check_gi_available():
+            logger.warning(
+                "GObject Introspection (gi) not available — tray requires it on Linux. "
+                "This often happens with 'uv tool install' (isolated environment). "
+                "Fix: reinstall with --venv flag: install.sh --venv"
+            )
+            return False
+        if not _check_gnome_appindicator():
+            return False
     return True
 
 
@@ -212,6 +271,10 @@ class DaemonTray:
         self._version_mismatch_notified = set()
         self._daemon_versions = {}
         self._daemon_about_cache = {}
+        self._pip_available = {}
+        self._pypi_latest = None
+        self._pypi_last_check = 0.0
+        self._upgrade_in_progress = set()
         self._discovery_animating = False
         self._discovery_anim_stop = threading.Event()
         self._discovery_timer = None
@@ -223,6 +286,7 @@ class DaemonTray:
         self._refresh_event = threading.Event()
         self._web_proc = None
         self._last_autostart_attempt = 0.0
+        self._last_stats_snapshot = None
 
     def start(self):
         """Start tray icon in a background thread.
@@ -297,30 +361,51 @@ class DaemonTray:
 
     _AUTOSTART_COOLDOWN = 5.0
 
+    def _can_autostart_daemon(self):
+        """Check if daemon auto-restart is possible.
+
+        Returns True when the tray is standalone and no stop-requested
+        marker exists (user explicitly stopped the daemon).
+        """
+        if not self._standalone:
+            return False
+        try:
+            from ai_guardian.config_utils import get_state_dir
+            marker = get_state_dir() / "daemon.stop-requested"
+            return not marker.exists()
+        except Exception:
+            return False
+
     def _check_and_autostart_daemon(self):
         """Auto-start local daemon if stopped (idle timeout or crash).
 
         Only runs in standalone tray mode. Respects stop-requested
         marker and cooldown. A paused daemon is still running and
         is not restarted.
+
+        Returns True if daemon is running after this call.
         """
         if not self._standalone:
-            return
+            return True
+        try:
+            from ai_guardian.daemon.client import is_daemon_running
+            if is_daemon_running():
+                return True
+        except Exception:
+            return False
         now = time.monotonic()
         if now - self._last_autostart_attempt < self._AUTOSTART_COOLDOWN:
-            return
+            return False
         self._last_autostart_attempt = now
         try:
-            from ai_guardian.daemon.client import (
-                is_daemon_running,
-                start_daemon_background,
-            )
-            if not is_daemon_running():
-                if start_daemon_background():
-                    logger.info("Auto-started daemon from tray interaction")
-                    self._request_discovery_refresh(wait=False)
+            from ai_guardian.daemon.client import start_daemon_background
+            if start_daemon_background():
+                logger.info("Auto-started daemon from tray interaction")
+                self._request_discovery_refresh(wait=False)
+                return True
         except Exception:
             pass
+        return False
 
     def update_status(self, status):
         """Update tray icon status and manage pause timer.
@@ -397,10 +482,13 @@ class DaemonTray:
             pystray.MenuItem("Restart", self._on_restart_tray),
             pystray.MenuItem("Quit", self._on_quit),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("About", self._on_about,
-                             enabled=lambda _: any(
-                                 t.status in ("running", "paused")
-                                 for t in self._targets
+            pystray.MenuItem(self._about_label, self._on_about,
+                             enabled=lambda _: (
+                                 any(
+                                     t.status in ("running", "paused")
+                                     for t in self._targets
+                                 )
+                                 or self._can_autostart_daemon()
                              )),
         )
         self._icon = pystray.Icon(
@@ -753,25 +841,55 @@ class DaemonTray:
         return self._mcp_installed_per_daemon.get(key, self._mcp_installed_local)
 
     @staticmethod
+    def _get_python_executable():
+        """Get the best available Python executable path.
+
+        Returns:
+            str: Path to Python executable
+        """
+        import shutil
+        import sys
+
+        # Try to find python in PATH
+        python_exe = shutil.which("python")
+        if python_exe:
+            return python_exe
+
+        # Try python3 as fallback
+        python_exe = shutil.which("python3")
+        if python_exe:
+            return python_exe
+
+        # Use sys.executable as last resort
+        return sys.executable
+
+    @staticmethod
     def _resolve_cli_cmd(*args):
         """Build command list for running ai-guardian with given arguments.
 
-        Always uses the current process's Python interpreter to guarantee
-        the same virtualenv as the running tray.
+        Uses absolute path to python to ensure it works in subprocesses that
+        may not have the same PATH (e.g., Terminal.app on macOS).
         """
-        import sys
+        import shutil
 
-        return [sys.executable, "-m", "ai_guardian"] + list(args)
+        # Try multiple strategies to find a working Python
+        # 1. Check if ai-guardian executable exists (best option)
+        ag_path = shutil.which("ai-guardian")
+        if ag_path:
+            return [ag_path] + list(args)
+
+        # 2. Use resolved Python executable
+        python_exe = DaemonTray._get_python_executable()
+        return [python_exe, "-m", "ai_guardian"] + list(args)
 
     @staticmethod
     def _resolve_plugin_ai_guardian(command_str, run_on_target, target):
-        """Replace bare ``ai-guardian`` with the tray's Python interpreter.
+        """Replace bare ``ai-guardian`` with absolute python path.
 
         Skipped for remote targets (container / kubernetes) where the
         command must resolve via PATH on the remote host.
         """
         import shlex
-        import sys
 
         is_remote = (
             run_on_target and target
@@ -783,7 +901,8 @@ class DaemonTray:
 
         stripped = command_str.lstrip()
         if stripped == "ai-guardian" or stripped.startswith("ai-guardian "):
-            resolved = shlex.quote(sys.executable) + " -m ai_guardian"
+            python_exe = DaemonTray._get_python_executable()
+            resolved = shlex.quote(python_exe) + " -m ai_guardian"
             return resolved + stripped[len("ai-guardian"):]
         return command_str
 
@@ -811,20 +930,21 @@ class DaemonTray:
                 pass
         try:
             cmd = DaemonTray._resolve_cli_cmd("console") + ["--web", "--no-open"]
+            logger.debug("Starting web console with command: %s", cmd)
             self._web_proc = subprocess.Popen(
                 cmd,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            logger.info("Web console started (pid %d)", self._web_proc.pid)
+            logger.info("Web console started (pid %d, cmd: %s)", self._web_proc.pid, cmd[0])
             threading.Thread(
                 target=self._notify_web_console_ready,
                 daemon=True,
                 name="web-console-notify",
             ).start()
         except Exception as e:
-            logger.debug("Web console failed to start: %s", e)
+            logger.error("Web console failed to start: %s (cmd: %s)", e, cmd if 'cmd' in locals() else 'N/A')
 
     def _notify_web_console_ready(self):
         """Wait for web console to be ready, update menu, then notify."""
@@ -861,8 +981,8 @@ class DaemonTray:
             elif system == "Linux":
                 subprocess.Popen(["notify-send", title, message])
             elif system == "Windows":
-                safe_title = title.replace("'", "''")
-                safe_msg = message.replace("'", "''")
+                safe_title = title.replace("'", "''").replace("`", "``").replace("$", "`$")
+                safe_msg = message.replace("'", "''").replace("`", "``").replace("$", "`$")
                 ps = (
                     "[System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms') | Out-Null; "
                     "[System.Reflection.Assembly]::LoadWithPartialName('System.Drawing') | Out-Null; "
@@ -940,6 +1060,15 @@ class DaemonTray:
         _launch_in_terminal(DaemonTray._resolve_cli_cmd("doctor"), keep_open=True)
 
     @staticmethod
+    def _about_label(_item=None):
+        """Build About menu label with tray version."""
+        try:
+            from ai_guardian import __version__
+            return f"About — v{__version__}"
+        except ImportError:
+            return "About"
+
+    @staticmethod
     def _build_about_text():
         """Build the About dialog text with tray process info."""
         from ai_guardian.daemon.about import get_about_info, format_about_text
@@ -957,6 +1086,19 @@ class DaemonTray:
             except Exception:
                 pass
         threading.Thread(target=_show, daemon=True, name="about-dialog").start()
+
+    def _daemon_about_label(self, slot):
+        """Build About menu label with daemon version for a specific slot."""
+        def _label(_item=None):
+            if slot >= len(self._targets):
+                return "About"
+            target = self._targets[slot]
+            key = (target.name, target.runtime)
+            version = self._daemon_versions.get(key, "")
+            if version:
+                return f"About — v{version}"
+            return "About"
+        return _label
 
     def _on_daemon_about(self, slot):
         """Show About info for a specific daemon via OS dialog."""
@@ -991,7 +1133,7 @@ class DaemonTray:
         for target in self._targets:
             key = (target.name, target.runtime)
             ver = self._daemon_versions.get(key, "?")
-            icon = {"running": "●", "paused": "◐", "stopped": "⚠"}.get(
+            icon = {"running": "●", "paused": "☾", "stopped": "⚠"}.get(
                 target.status, "○"
             )
             suffix = ""
@@ -1071,6 +1213,40 @@ class DaemonTray:
                 self._icon.update_menu()
             except Exception:
                 pass
+
+    def _refresh_menu_if_changed(self):
+        """Refresh the tray menu only if stats changed.
+
+        GNOME's AppIndicator rebuilds the entire DBus menu tree on
+        update_menu(), causing a visible blank flash.  Skip the call
+        when nothing has changed.
+        """
+        snapshot = self._build_stats_snapshot()
+        if snapshot == self._last_stats_snapshot:
+            return
+        self._last_stats_snapshot = snapshot
+        self._refresh_menu()
+
+    def _build_stats_snapshot(self):
+        """Build a hashable snapshot of menu-relevant state."""
+        try:
+            stats = self._get_stats()
+            return (
+                stats.get("request_count"),
+                stats.get("blocked_count"),
+                stats.get("warning_count"),
+                stats.get("violation_count"),
+                stats.get("paused"),
+                stats.get("pause_remaining_seconds", 0) // 5,
+                stats.get("config_error"),
+                self._status,
+                len(self._targets),
+                tuple(
+                    (t.name, t.status) for t in self._targets
+                ),
+            )
+        except Exception:
+            return None
 
     def _refresh_menu_and_clear_discovery_flag(self):
         """Refresh menu and clear the discovery refresh guard (main thread)."""
@@ -1186,6 +1362,13 @@ class DaemonTray:
                         daemon=True,
                         name="version-mismatch-notify",
                     ).start()
+                if key not in self._pip_available:
+                    threading.Thread(
+                        target=self._check_pip_available_for_target,
+                        args=(target,),
+                        daemon=True,
+                        name="pip-check",
+                    ).start()
             elif key in self._version_mismatch_notified:
                 self._version_mismatch_notified.discard(key)
 
@@ -1201,6 +1384,161 @@ class DaemonTray:
             )
         except Exception:
             pass
+
+    def _check_pypi_version(self):
+        """Fetch latest version from PyPI (throttled to every 300s)."""
+        import time as _time
+        now = _time.monotonic()
+        if now - self._pypi_last_check < 300:
+            return
+        self._pypi_last_check = now
+        try:
+            from ai_guardian.daemon.multi_client import MultiDaemonClient
+            version = MultiDaemonClient.check_pypi_version()
+            if version:
+                self._pypi_latest = version
+        except (OSError, ValueError, KeyError):
+            pass
+
+    def _check_pip_available_for_target(self, target):
+        """Check pip availability on a target (runs in background thread)."""
+        key = (target.name, target.runtime)
+        try:
+            if self._multi_client:
+                available = self._multi_client.check_pip_available(target)
+            else:
+                import subprocess as _sp
+                python_exe = DaemonTray._get_python_executable()
+                result = _sp.run(
+                    [python_exe, "-m", "pip", "--version"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                available = result.returncode == 0
+            self._pip_available[key] = available
+        except Exception:
+            self._pip_available[key] = False
+
+    def _is_upgrade_available(self, target):
+        """Return True if target has a version mismatch and pip is available.
+
+        Only offers upgrade if tray version is installable (not a dev version).
+        """
+        if not target:
+            return False
+        key = (target.name, target.runtime)
+        # Don't offer upgrade if tray is running a dev version (not on PyPI)
+        try:
+            from ai_guardian import __version__ as tray_version
+            if "-dev" in tray_version or "dev" in tray_version.lower():
+                return False
+        except ImportError:
+            return False
+        return (
+            key in self._version_mismatch_notified
+            and self._pip_available.get(key, False)
+            and key not in self._upgrade_in_progress
+        )
+
+    def _upgrade_label(self, target):
+        """Dynamic label for the sync-to-tray-version menu item."""
+        if target:
+            key = (target.name, target.runtime)
+            if key in self._upgrade_in_progress:
+                return "Syncing…"
+        try:
+            from ai_guardian import __version__ as tray_version
+            return f"Match Tray v{tray_version}"
+        except ImportError:
+            return "Match Tray Version"
+
+    def _do_upgrade_daemon(self, target):
+        """Sync daemon version to match tray version (runs in background thread)."""
+        key = (target.name, target.runtime)
+        self._upgrade_in_progress.add(key)
+        self._dispatch_to_main(self._refresh_menu)
+
+        # Get tray version to sync to
+        try:
+            from ai_guardian import __version__ as tray_version
+        except ImportError:
+            tray_version = None
+
+        try:
+            from ai_guardian.daemon.tray_plugins import send_notification
+            send_notification(
+                "AI Guardian",
+                f"Syncing ai-guardian on '{target.name}' to v{tray_version}…" if tray_version
+                else f"Syncing ai-guardian on '{target.name}'…",
+            )
+        except Exception:
+            pass
+
+        success = False
+        output = ""
+        try:
+            if self._multi_client:
+                success, output = self._multi_client.run_pip_upgrade(target, tray_version)
+            else:
+                import subprocess as _sp
+                python_exe = DaemonTray._get_python_executable()
+                # Install specific version to match tray
+                if tray_version:
+                    cmd = [python_exe, "-m", "pip", "install", f"ai-guardian=={tray_version}"]
+                else:
+                    cmd = [python_exe, "-m", "pip", "install", "--upgrade", "ai-guardian"]
+                result = _sp.run(cmd, capture_output=True, text=True, timeout=120)
+                success = result.returncode == 0
+                output = result.stdout + result.stderr
+        except Exception as exc:
+            output = str(exc)
+
+        try:
+            from ai_guardian.daemon.tray_plugins import send_notification
+            if success:
+                send_notification(
+                    "AI Guardian",
+                    f"Version sync complete on '{target.name}'. Restarting daemon…",
+                )
+                if self._multi_client:
+                    self._multi_client.send_restart(target)
+                self._version_mismatch_notified.discard(key)
+                self._daemon_versions.pop(key, None)
+                self._pip_available.pop(key, None)
+            else:
+                first_line = output.strip().split("\n")[-1][:120] if output else "unknown error"
+                send_notification(
+                    "AI Guardian",
+                    f"Version sync failed on '{target.name}': {first_line}",
+                )
+        except Exception:
+            pass
+        finally:
+            self._upgrade_in_progress.discard(key)
+            self._dispatch_to_main(self._refresh_menu)
+
+    def _on_upgrade_single(self, _icon, _item):
+        """Click handler for single-daemon Upgrade menu item."""
+        if self._targets:
+            target = self._targets[0]
+            threading.Thread(
+                target=self._do_upgrade_daemon,
+                args=(target,),
+                daemon=True,
+                name="daemon-upgrade",
+            ).start()
+
+    def _mk_upgrade(self, slot):
+        """Factory returning a click handler for multi-daemon Upgrade item."""
+        def action(_, __):
+            if slot < len(self._targets):
+                target = self._targets[slot]
+                threading.Thread(
+                    target=self._do_upgrade_daemon,
+                    args=(target,),
+                    daemon=True,
+                    name=f"daemon-upgrade-{slot}",
+                ).start()
+        return action
 
     def _update_global_pause_status(self):
         """Set tray icon to paused only when ALL daemons are paused."""
@@ -1288,9 +1626,10 @@ class DaemonTray:
                     self._dispatch_to_main(self._sync_pause_state)
                     self._check_config_error_notification()
                     self._check_version_mismatch()
+                    self._check_pypi_version()
                     self._poll_plugins()
                     self._request_discovery_refresh(wait=False)
-                    self._dispatch_to_main(self._refresh_menu)
+                    self._dispatch_to_main(self._refresh_menu_if_changed)
 
         thread = threading.Thread(
             target=_refresh, daemon=True, name="stats-refresh"
@@ -1309,6 +1648,157 @@ class DaemonTray:
             return f"Resume ({mins}m {secs}s left)"
         return "Resume (paused)"
 
+
+    def _get_merged_dir_list(self, stats):
+        """Merge active project dirs and paused dirs into a sorted list."""
+        active = set(stats.get("active_project_dirs") or [])
+        paused = set(stats.get("paused_dirs") or {})
+        return sorted(active | paused)
+
+    def _multi_global_pause_label(self, stats_fns, _item):
+        """Format global pause label with status circle for multi-daemon."""
+        is_paused = stats_fns[9](_item)
+        if is_paused:
+            stats = stats_fns[11](_item)
+            remaining = stats.get("pause_remaining_seconds", 0)
+            if remaining > 0:
+                mins = int(remaining // 60)
+                secs = int(remaining % 60)
+                return f"☾ Daemon (global) ({mins}m {secs}s)"
+            return "☾ Daemon (global)"
+        return "● Daemon (global)"
+
+    def _mk_multi_pause_dir(self, slot):
+        """Create a pause_dir callback for a multi-daemon slot."""
+        def pause_dir_fn(directory, minutes):
+            if slot < len(self._targets) and self._multi_client:
+                self._multi_client.send_pause_dir(
+                    self._targets[slot], directory, minutes,
+                )
+        return pause_dir_fn
+
+    def _mk_multi_resume_dir(self, slot):
+        """Create a resume_dir callback for a multi-daemon slot."""
+        def resume_dir_fn(directory):
+            if slot < len(self._targets) and self._multi_client:
+                self._multi_client.send_resume_dir(
+                    self._targets[slot], directory,
+                )
+        return resume_dir_fn
+
+    def _build_dir_pause_items(self, get_stats_fn, pause_dir_fn, resume_dir_fn):
+        """Build pre-allocated per-directory pause/resume menu items.
+
+        Returns a list of pystray.MenuItem, one per slot, each with a
+        submenu for duration options or resume. Uses visibility lambdas
+        to show only slots with actual directories.
+        """
+        from ai_guardian.daemon.working_dir import shorten_path
+
+        items = []
+        for i in range(self._MAX_DIR_PAUSE_SLOTS):
+            slot = i
+
+            def _dir_at(s, stats, slot=slot):
+                dirs = self._get_merged_dir_list(stats)
+                if slot < len(dirs):
+                    return dirs[slot]
+                return None
+
+            def _is_visible(_item, slot=slot):
+                stats = get_stats_fn(_item)
+                return _dir_at(None, stats, slot) is not None
+
+            def _label(_item, slot=slot):
+                stats = get_stats_fn(_item)
+                d = _dir_at(None, stats, slot)
+                if d is None:
+                    return ""
+                paused_dirs = stats.get("paused_dirs") or {}
+                short = shorten_path(d)
+                if len(short) > 40:
+                    short = "..." + short[-37:]
+                if d in paused_dirs:
+                    remaining = paused_dirs[d]
+                    if remaining > 0:
+                        mins = int(remaining // 60)
+                        secs = int(remaining % 60)
+                        return f"☾ {short} ({mins}m {secs}s)"
+                    return f"☾ {short}"
+                return f"● {short}"
+
+            def _is_paused(_item, slot=slot):
+                stats = get_stats_fn(_item)
+                d = _dir_at(None, stats, slot)
+                if d is None:
+                    return False
+                return d in (stats.get("paused_dirs") or {})
+
+            def _is_active(_item, slot=slot):
+                stats = get_stats_fn(_item)
+                d = _dir_at(None, stats, slot)
+                if d is None:
+                    return False
+                return d not in (stats.get("paused_dirs") or {})
+
+            def _mk_dir_pause(minutes, slot=slot):
+                def action(_, __):
+                    stats = get_stats_fn(None)
+                    d = _dir_at(None, stats, slot)
+                    if d:
+                        pause_dir_fn(d, minutes)
+                return action
+
+            def _mk_dir_resume(slot=slot):
+                def action(_, __):
+                    stats = get_stats_fn(None)
+                    d = _dir_at(None, stats, slot)
+                    if d:
+                        resume_dir_fn(d)
+                return action
+
+            def _full_path_label(_item, slot=slot):
+                stats = get_stats_fn(_item)
+                d = _dir_at(None, stats, slot)
+                return shorten_path(d) if d else ""
+
+            items.append(
+                pystray.MenuItem(
+                    _label,
+                    pystray.Menu(
+                        pystray.MenuItem(
+                            _full_path_label, None, enabled=False,
+                        ),
+                        pystray.Menu.SEPARATOR,
+                        pystray.MenuItem(
+                            "5 minutes", _mk_dir_pause(5),
+                            visible=_is_active,
+                        ),
+                        pystray.MenuItem(
+                            "15 minutes", _mk_dir_pause(15),
+                            visible=_is_active,
+                        ),
+                        pystray.MenuItem(
+                            "30 minutes", _mk_dir_pause(30),
+                            visible=_is_active,
+                        ),
+                        pystray.MenuItem(
+                            "1 hour", _mk_dir_pause(60),
+                            visible=_is_active,
+                        ),
+                        pystray.MenuItem(
+                            "Until resume", _mk_dir_pause(0),
+                            visible=_is_active,
+                        ),
+                        pystray.MenuItem(
+                            "Resume", _mk_dir_resume(),
+                            visible=_is_paused,
+                        ),
+                    ),
+                    visible=_is_visible,
+                )
+            )
+        return items
 
     def _on_targets_updated(self, targets):
         """Callback from background discovery with updated target list."""
@@ -1368,6 +1858,7 @@ class DaemonTray:
         return self._get_stats()
 
     _MAX_DAEMON_SLOTS = 8
+    _MAX_DIR_PAUSE_SLOTS = 16
     _MAX_PLUGIN_SLOTS = 8
     _MAX_ITEMS_PER_PLUGIN = 12
     _MAX_SUBMENU_ITEMS = 8
@@ -1387,7 +1878,7 @@ class DaemonTray:
         from ai_guardian.daemon.working_dir import shorten_path
 
         status_icon = {
-            "running": "●", "paused": "◐", "starting": "◌",
+            "running": "●", "paused": "☾", "starting": "◌",
             "stopped": "⚠", "error": "✗", "unknown": "○",
         }.get(target.status, "○")
         if target.runtime == "container" and target.container_engine:
@@ -1474,8 +1965,11 @@ class DaemonTray:
             return self._is_single_daemon()
 
         def _single_running(_item):
-            return (self._is_single_daemon()
-                    and self._targets[0].status in ("running", "paused"))
+            if not self._is_single_daemon():
+                return False
+            if self._targets[0].status in ("running", "paused"):
+                return True
+            return self._can_autostart_daemon()
 
         def _single_not_running(_item):
             return (self._is_single_daemon()
@@ -1489,11 +1983,13 @@ class DaemonTray:
         def _open_panel(panel=None):
             def action(_, __):
                 self._check_and_autostart_daemon()
-                if panel and self._has_web_console and self._is_web_console_ready():
-                    web_page = self._PANEL_TO_WEB_PATH.get(panel, "")
+                # Try to open web console if available (for any panel including main console)
+                if self._has_web_console and self._is_web_console_ready():
+                    web_page = self._PANEL_TO_WEB_PATH.get(panel, "") if panel else ""
                     daemon_name = self._targets[0].name if self._targets else ""
                     self._open_web_console(daemon_name, web_page)
                     return
+                # Fall back to TUI console
                 if self._targets:
                     t = self._targets[0]
                     if self._multi_client:
@@ -1643,16 +2139,9 @@ class DaemonTray:
         return [
             pystray.MenuItem(_header_label, None, visible=_single_vis_refresh),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Console", _open_panel(),
+            pystray.MenuItem("Console",
+                             _open_panel(None),  # None means main console page
                              visible=_single_vis, enabled=_single_running),
-            pystray.MenuItem("Web Console",
-                             lambda _, __: self._open_web_console(
-                                 self._targets[0].name if self._targets else ""
-                             ),
-                             visible=lambda _: (self._has_web_console
-                                                and self._is_single_daemon()
-                                                and self._is_web_console_ready()),
-                             enabled=_single_running),
             pystray.MenuItem("Violations", _open_panel("panel-violations"),
                              visible=_single_vis, enabled=_single_running),
             pystray.MenuItem("Metrics & Audit", _open_panel("panel-metrics"),
@@ -1727,29 +2216,81 @@ class DaemonTray:
         _single_not_running = c["single_not_running"]
         _get_stats = c["get_stats"]
 
+        def _global_pause_label(_item):
+            stats = _get_stats(_item)
+            if stats.get("paused"):
+                remaining = stats.get("pause_remaining_seconds", 0)
+                if remaining > 0:
+                    mins = int(remaining // 60)
+                    secs = int(remaining % 60)
+                    return f"☾ Daemon (global) ({mins}m {secs}s)"
+                return "☾ Daemon (global)"
+            return "● Daemon (global)"
+
+        def _global_is_paused(_item):
+            return _get_stats(_item).get("paused", False)
+
+        def _global_is_active(_item):
+            return not _get_stats(_item).get("paused", False)
+
+        def _pause_dir_action(directory, minutes):
+            if self._targets and self._multi_client:
+                self._multi_client.send_pause_dir(
+                    self._targets[0], directory, minutes,
+                )
+
+        def _resume_dir_action(directory):
+            if self._targets and self._multi_client:
+                self._multi_client.send_resume_dir(
+                    self._targets[0], directory,
+                )
+
+        dir_pause_items = self._build_dir_pause_items(
+            _get_stats, _pause_dir_action, _resume_dir_action,
+        )
+
+        def _has_dirs(_item):
+            stats = _get_stats(_item)
+            return bool(self._get_merged_dir_list(stats))
+
         return [
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(
                 "Pause...",
                 pystray.Menu(
-                    pystray.MenuItem("5 minutes", _pause_action(5)),
-                    pystray.MenuItem("15 minutes", _pause_action(15)),
-                    pystray.MenuItem("30 minutes", _pause_action(30)),
-                    pystray.MenuItem("1 hour", _pause_action(60)),
-                    pystray.MenuItem("Until resume", _pause_action(0)),
+                    pystray.MenuItem(
+                        _global_pause_label,
+                        pystray.Menu(
+                            pystray.MenuItem(
+                                "5 minutes", _pause_action(5),
+                                visible=_global_is_active,
+                            ),
+                            pystray.MenuItem(
+                                "15 minutes", _pause_action(15),
+                                visible=_global_is_active,
+                            ),
+                            pystray.MenuItem(
+                                "30 minutes", _pause_action(30),
+                                visible=_global_is_active,
+                            ),
+                            pystray.MenuItem(
+                                "1 hour", _pause_action(60),
+                                visible=_global_is_active,
+                            ),
+                            pystray.MenuItem(
+                                "Until resume", _pause_action(0),
+                                visible=_global_is_active,
+                            ),
+                            pystray.MenuItem(
+                                "Resume", _resume_action,
+                                visible=_global_is_paused,
+                            ),
+                        ),
+                    ),
+                    pystray.Menu.SEPARATOR,
+                    *dir_pause_items,
                 ),
-                visible=lambda _: (
-                    _single_running(_)
-                    and not _get_stats(_).get("paused")
-                ),
-            ),
-            pystray.MenuItem(
-                lambda _: self._resume_menu_label(),
-                _resume_action,
-                visible=lambda _: (
-                    _single_running(_)
-                    and _get_stats(_).get("paused")
-                ),
+                visible=_single_running,
             ),
             pystray.MenuItem("Start daemon", _restart_action,
                              visible=_single_not_running),
@@ -1757,6 +2298,17 @@ class DaemonTray:
                              visible=_single_running),
             pystray.MenuItem("Restart daemon", _restart_action,
                              visible=lambda _: self._is_single_daemon()),
+            pystray.MenuItem(
+                lambda _: self._upgrade_label(
+                    self._targets[0] if self._targets else None,
+                ),
+                self._on_upgrade_single,
+                visible=lambda _: (
+                    self._is_single_daemon()
+                    and self._targets
+                    and self._is_upgrade_available(self._targets[0])
+                ),
+            ),
         ]
 
     def _build_multi_daemon_menu_items(self):
@@ -1964,13 +2516,16 @@ class DaemonTray:
                 return (requests, blocked, warned, logged,
                         violations, critical, warning_sev,
                         last_block, config_reload,
-                        is_paused, resume_label)
+                        is_paused, resume_label, _get)
 
             stats_fns = _mk_stats()
 
             def _is_slot_running(_item, slot=idx):
-                return (slot < len(self._targets)
-                        and self._targets[slot].status in ("running", "paused"))
+                if slot >= len(self._targets):
+                    return False
+                if self._targets[slot].status in ("running", "paused"):
+                    return True
+                return self._can_autostart_daemon()
 
             multi_plugin_items = self._build_multi_daemon_plugin_slots(idx)
 
@@ -1978,9 +2533,7 @@ class DaemonTray:
                 pystray.MenuItem(
                     make_label,
                     pystray.Menu(
-                        pystray.MenuItem("Console", _mk_open_panel(),
-                                         enabled=_is_slot_running),
-                        pystray.MenuItem("Web Console",
+                        pystray.MenuItem("Console",
                                          _mk_web_console_action(idx),
                                          visible=_mk_web_console_visible(idx),
                                          enabled=_is_slot_running),
@@ -2046,23 +2599,57 @@ class DaemonTray:
                         pystray.MenuItem(
                             "Pause...",
                             pystray.Menu(
-                                pystray.MenuItem("5 minutes", _mk_pause(5)),
-                                pystray.MenuItem("15 minutes", _mk_pause(15)),
-                                pystray.MenuItem("30 minutes", _mk_pause(30)),
-                                pystray.MenuItem("1 hour", _mk_pause(60)),
-                                pystray.MenuItem("Until resume", _mk_pause(0)),
+                                pystray.MenuItem(
+                                    lambda _i, _sf=stats_fns: (
+                                        self._multi_global_pause_label(_sf, _i)
+                                    ),
+                                    pystray.Menu(
+                                        pystray.MenuItem(
+                                            "5 minutes", _mk_pause(5),
+                                            visible=lambda _i, _sf=stats_fns: (
+                                                not _sf[9](_i)
+                                            ),
+                                        ),
+                                        pystray.MenuItem(
+                                            "15 minutes", _mk_pause(15),
+                                            visible=lambda _i, _sf=stats_fns: (
+                                                not _sf[9](_i)
+                                            ),
+                                        ),
+                                        pystray.MenuItem(
+                                            "30 minutes", _mk_pause(30),
+                                            visible=lambda _i, _sf=stats_fns: (
+                                                not _sf[9](_i)
+                                            ),
+                                        ),
+                                        pystray.MenuItem(
+                                            "1 hour", _mk_pause(60),
+                                            visible=lambda _i, _sf=stats_fns: (
+                                                not _sf[9](_i)
+                                            ),
+                                        ),
+                                        pystray.MenuItem(
+                                            "Until resume", _mk_pause(0),
+                                            visible=lambda _i, _sf=stats_fns: (
+                                                not _sf[9](_i)
+                                            ),
+                                        ),
+                                        pystray.MenuItem(
+                                            "Resume", _mk_resume(),
+                                            visible=lambda _i, _sf=stats_fns: (
+                                                _sf[9](_i)
+                                            ),
+                                        ),
+                                    ),
+                                ),
+                                pystray.Menu.SEPARATOR,
+                                *self._build_dir_pause_items(
+                                    stats_fns[11],
+                                    self._mk_multi_pause_dir(idx),
+                                    self._mk_multi_resume_dir(idx),
+                                ),
                             ),
-                            visible=lambda _i, s=idx, _sf=stats_fns: (
-                                _is_slot_running(_i, s)
-                                and not _sf[9](_i)
-                            ),
-                        ),
-                        pystray.MenuItem(
-                            stats_fns[10], _mk_resume(),
-                            visible=lambda _i, s=idx, _sf=stats_fns: (
-                                _is_slot_running(_i, s)
-                                and _sf[9](_i)
-                            ),
+                            visible=_is_slot_running,
                         ),
                         pystray.MenuItem(
                             "Start daemon", _mk_restart(),
@@ -2080,8 +2667,21 @@ class DaemonTray:
                         pystray.MenuItem(
                             "Restart daemon", _mk_restart(),
                         ),
+                        pystray.MenuItem(
+                            lambda _i, s=idx: self._upgrade_label(
+                                self._targets[s]
+                                if s < len(self._targets) else None,
+                            ),
+                            self._mk_upgrade(idx),
+                            visible=lambda _i, s=idx: (
+                                s < len(self._targets)
+                                and self._is_upgrade_available(
+                                    self._targets[s]
+                                )
+                            ),
+                        ),
                         pystray.Menu.SEPARATOR,
-                        pystray.MenuItem("About", self._on_daemon_about(idx),
+                        pystray.MenuItem(self._daemon_about_label(idx), self._on_daemon_about(idx),
                                          enabled=_is_slot_running),
                     ),
                     visible=make_visible,
@@ -2773,9 +3373,9 @@ class DaemonTray:
     def _on_restart_tray(self, icon, item):
         """Restart the tray process."""
         import subprocess
-        import sys
 
-        cmd = [sys.executable, "-m", "ai_guardian", "tray", "start"]
+        cmd = DaemonTray._resolve_cli_cmd("tray", "start")
+        logger.debug("Restarting tray with command: %s", cmd)
         self.stop()
         self._stop()
         try:
@@ -2787,7 +3387,7 @@ class DaemonTray:
                 start_new_session=True,
             )
         except OSError as e:
-            logger.debug("Failed to restart tray: %s", e)
+            logger.error("Failed to restart tray: %s (cmd: %s)", e, cmd)
 
     def _on_quit(self, icon, item):
         self.stop()

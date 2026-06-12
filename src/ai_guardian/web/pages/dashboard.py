@@ -18,6 +18,8 @@ FEATURE_GROUPS = [
         ("prompt_injection", "Prompt Injection", "Detect and block prompt injection attacks"),
         ("ssrf_protection", "SSRF Protection", "Block requests to private networks and metadata"),
         ("config_file_scanning", "Config File Scanner", "Detect credential exfiltration in config files"),
+        ("context_poisoning", "Context Poisoning", "Detect context poisoning attempts"),
+        ("supply_chain", "Supply Chain", "Detect malicious hooks, MCP servers, and plugins"),
     ]),
     ("Response Protection", [
         ("secret_redaction", "Secret Redaction", "Redact secrets from tool outputs"),
@@ -26,11 +28,28 @@ FEATURE_GROUPS = [
     ("Access Control", [
         ("permissions", "Permissions", "Tool permission enforcement"),
         ("security_instructions", "Security Instructions", "Security rule injection into AI context"),
+        ("directory_rules", "Directory Rules", "Block access to protected directories"),
     ]),
     ("Monitoring", [
         ("violation_logging", "Violation Logging", "Log blocked operations for audit"),
+        ("latency_tracking", "Latency Tracking", "Record per-hook timing to latency.jsonl"),
     ]),
 ]
+
+FEATURE_PAGE_SLUGS = {
+    "secret_scanning": "secrets",
+    "scan_pii": "scan-pii",
+    "prompt_injection": "pi-detection",
+    "ssrf_protection": "ssrf",
+    "config_file_scanning": "config-scanner",
+    "context_poisoning": "context-poisoning",
+    "secret_redaction": "secret-redaction",
+    "annotations": "annotations",
+    "permissions": "permission-rules",
+    "directory_rules": "directory-rules",
+    "violation_logging": "violation-logging",
+    "latency_tracking": "performance",
+}
 
 
 def _get_feature_status(config, key):
@@ -71,11 +90,33 @@ def _parse_enabled(status):
     return bool(status), None
 
 
+_DEFAULT_ACTIONS = {
+    "secret_scanning": "block",
+    "image_scanning": "block",
+    "scan_pii": "block",
+    "transcript_scanning": "scan",
+    "prompt_injection": "block",
+    "ssrf_protection": "block",
+    "config_file_scanning": "block",
+    "context_poisoning": "warn",
+    "supply_chain": "block",
+    "secret_redaction": "warn",
+    "annotations": "suppress",
+    "permissions": "enforce",
+    "security_instructions": "inject",
+    "directory_rules": "block",
+    "violation_logging": "log",
+    "latency_tracking": "log",
+}
+
+
 def _get_action(config, key):
     section = config.get(key, {})
     if isinstance(section, dict):
-        return section.get("action")
-    return None
+        action = section.get("action")
+        if action:
+            return action
+    return _DEFAULT_ACTIONS.get(key)
 
 
 def _categorize_violation(reason):
@@ -159,6 +200,8 @@ def create_dashboard_page(service, daemon_name: str):
             violations_box = None
 
             async def refresh_violations():
+                if ui.context.client.is_deleted:
+                    return
                 if violations_box is None:
                     return
 
@@ -323,9 +366,23 @@ def create_dashboard_page(service, daemon_name: str):
                                         status_text = "Disabled"
                                         status_color = "text-red"
 
-                                    with ui.card().classes("w-52").style(
-                                        f"border-left: 4px solid {border}"
-                                    ):
+                                    slug = FEATURE_PAGE_SLUGS.get(key)
+                                    card_style = (
+                                        f"border-left: 4px solid {border}; "
+                                        "cursor: pointer"
+                                        if slug
+                                        else f"border-left: 4px solid {border}"
+                                    )
+                                    card = ui.card().classes("w-52").style(
+                                        card_style
+                                    )
+                                    if slug:
+                                        card.on(
+                                            "click",
+                                            lambda dn=daemon_name, s=slug:
+                                                ui.navigate.to(f"/{dn}/{s}"),
+                                        )
+                                    with card:
                                         with ui.row().classes(
                                             "items-center gap-1"
                                         ):

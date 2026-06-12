@@ -257,8 +257,11 @@ Before creating the release branch, trigger the automated release readiness work
 - `detection-end-to-end` — Secret, PII, and prompt injection detection
 - `config-validation` — Config profiles, migration, doctor checks
 - `mcp-server` — MCP server initialize and tool call response
+- `smoke-tests` — End-to-end violation detection for all types (secret, PII, prompt injection, SSRF, directory blocking, config exfil, jailbreak, context poisoning)
 
 **Skipping**: The readiness check may be skipped for hotfix releases (`/release hotfix`) when the fix is urgent, but this should be documented in the release notes.
+
+**Note**: The release readiness workflow includes smoke tests (`smoke-tests.yml`) as a reusable workflow — no need to run smoke tests separately.
 
 ## Documentation Review (mandatory)
 
@@ -355,10 +358,14 @@ Before creating the release branch, check for open Dependabot security alerts an
 5. [ ] Test installation from package registry
 6. [ ] Merge release branch back to main
 7. [ ] Bump version to next dev cycle (X.Y+1.0-dev)
-8. [ ] Push main branch
-9. [ ] (Hotfix only) Cherry-pick fix to main
-10. [ ] Generate combined docs export — run the shell one-liner from AGENTS.md "Generating Combined Documentation for LLM Upload" section to create `docs/notebooklm-export.md`
-11. [ ] Update NotebookLM sources — if the `notebooklm-mcp` MCP server is available, upload the generated `docs/notebooklm-export.md` and update other sources in the AI Guardian notebook using `source_add`
+8. [ ] Update curl install URLs in `README.md`:
+      - **Release branch**: replace old version tag with new one (e.g., `v1.11.0` → `v1.11.1`)
+      - **Main branch**: ensure URLs point to `main` (not a version tag — there is no PyPI release for dev versions)
+9. [ ] Push main branch
+10. [ ] (Hotfix only) Cherry-pick fix to main
+11. [ ] Generate combined docs export — run the shell one-liner from AGENTS.md "Generating Combined Documentation for LLM Upload" section to create `docs/notebooklm-export.md`
+12. [ ] Update NotebookLM sources — if the `notebooklm-mcp` MCP server is available, upload the generated `docs/notebooklm-export.md` and update other sources in the AI Guardian notebook using `source_add`
+13. [ ] Generate demo guide — create `X.Y-demo-guide.md` in the external docs directory (see AGENTS.md) documenting new features with step-by-step demonstrations for stakeholder walkthroughs
 
 **If you are NOT authorized:**
 - ❌ DO NOT push the tag

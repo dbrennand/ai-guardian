@@ -1,10 +1,13 @@
 """OpenAI Codex hook adapter.
 
-Codex uses Claude-compatible hook payloads and responses for the shared
-events, but it also adds PermissionRequest and TOML-managed hook config.
+Codex uses Claude-compatible PascalCase hook payloads and JSON responses
+for the shared events, but it also adds a PermissionRequest hook and
+stores transcripts in ~/.codex/sessions/YYYY/MM/DD/*.jsonl.
 """
 
+import glob
 import json
+import os
 from typing import ClassVar, Dict, List
 
 from ai_guardian.constants import HookEvent
@@ -15,10 +18,14 @@ class CodexAdapter(ClaudeCodeAdapter):
     """Adapter for OpenAI Codex.
 
     Codex shares Claude Code's hook format (PascalCase events, same
-    JSON response structure). Detection relies on env var override only.
+    JSON response structure), but it adds PermissionRequest-specific
+    behavior and transcript path discovery.
     """
 
     ENV_ALIASES: ClassVar[List[str]] = ["codex"]
+
+    # Base directory for Codex session transcripts
+    SESSIONS_DIR = os.path.expanduser("~/.codex/sessions")
 
     @property
     def ide_type(self):
@@ -103,3 +110,22 @@ class CodexAdapter(ClaudeCodeAdapter):
             has_secrets,
             violation_type,
         )
+
+    def get_default_transcript_paths(self) -> List[str]:
+        """Return Codex JSONL transcript paths that exist on disk.
+
+        Codex organises sessions by date: ~/.codex/sessions/YYYY/MM/DD/*.jsonl
+        Returns all JSONL files sorted by modification time (most recent first)
+        so the caller can scan the active session.
+        """
+        if not os.path.isdir(self.SESSIONS_DIR):
+            return []
+
+        pattern = os.path.join(self.SESSIONS_DIR, "**", "*.jsonl")
+        files = glob.glob(pattern, recursive=True)
+        if not files:
+            return []
+
+        # Sort by modification time, most recent first
+        files.sort(key=lambda f: os.path.getmtime(f), reverse=True)
+        return files

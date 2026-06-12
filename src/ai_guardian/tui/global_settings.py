@@ -31,7 +31,10 @@ FEATURES = [
     ("scan_pii", "gs_scan_pii", "👤 PII Detection"),
     ("ssrf_protection", "gs_ssrf_protection", "🌐 SSRF Protection"),
     ("config_file_scanning", "gs_config_file_scanning", "📄 Config File Scanning"),
+    ("context_poisoning", "gs_context_poisoning", "🧪 Context Poisoning Detection"),
+    ("supply_chain", "gs_supply_chain", "🔗 Supply Chain Scanning"),
     ("violation_logging", "gs_violation_logging", "📝 Violation Logging"),
+    ("latency_tracking", "gs_latency_tracking", "⏱️ Latency Tracking"),
 ]
 
 FEATURE_ACTIONS = {
@@ -73,6 +76,24 @@ FEATURE_ACTIONS = {
     },
     "config_file_scanning": {
         "schema_path": "config_file_scanning.action",
+        "options": [
+            ("Block", "block"),
+            ("Warn", "warn"),
+            ("Log Only", "log-only"),
+        ],
+        "default": "block",
+    },
+    "context_poisoning": {
+        "schema_path": "context_poisoning.action",
+        "options": [
+            ("Block", "block"),
+            ("Warn", "warn"),
+            ("Log Only", "log-only"),
+        ],
+        "default": "warn",
+    },
+    "supply_chain": {
+        "schema_path": "supply_chain.action",
         "options": [
             ("Block", "block"),
             ("Warn", "warn"),

@@ -499,6 +499,24 @@
               }
             }
           }
+        },
+        "validate_secrets": {
+          "type": "boolean",
+          "description": "Enable secret liveness validation (NEW in v1.11.0). When enabled, detected secrets are validated against their provider API to check if they're still active. Inactive (revoked/expired) secrets produce a warning instead of blocking. PRIVACY NOTE: sends detected secrets to provider APIs. Requires explicit opt-in. See Issue #971.",
+          "default": false
+        },
+        "validation_timeout_ms": {
+          "type": "integer",
+          "description": "Timeout in milliseconds for each secret validation HTTP request. Applies per-secret, not total. Default: 3000ms.",
+          "default": 3000,
+          "minimum": 500,
+          "maximum": 30000
+        },
+        "on_inactive": {
+          "type": "string",
+          "description": "Action to take when a secret is validated as inactive (revoked/expired). 'warn' logs a warning but does not block. 'allow' silently skips without warning. Verified-active and unverified secrets always block regardless of this setting.",
+          "enum": ["warn", "allow"],
+          "default": "warn"
         }
       },
       "additionalProperties": true
@@ -807,8 +825,53 @@
         },
         "detector": {
           "type": "string",
-          "enum": ["heuristic", "rebuff", "llm-guard"],
-          "description": "Detection method: heuristic (local patterns, <1ms), rebuff/llm-guard (ML-based, requires setup)",
+          "enum": ["heuristic", "ml", "hybrid", "rebuff", "llm-guard"],
+          "description": "Detection method: heuristic (local patterns, <1ms), ml (ML-only via daemon, 10-50ms), hybrid (heuristic first, ML for uncertain cases), rebuff/llm-guard (legacy stubs)",
+          "default": "heuristic"
+        },
+        "ml_engines": {
+          "type": "array",
+          "description": "ML engines for prompt injection detection (NEW in v1.11.0, Issue #185). Each engine runs an ONNX model in the daemon process. Requires: onnxruntime (included on Python < 3.13) and ai-guardian ml download.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": ["llm-guard"],
+                "description": "Engine type"
+              },
+              "model": {
+                "type": "string",
+                "description": "Model name from registry (e.g., protectai/deberta-v3-base-prompt-injection-v2)"
+              },
+              "threshold": {
+                "type": "number",
+                "description": "Confidence threshold for this engine (0.0-1.0)",
+                "default": 0.85,
+                "minimum": 0.0,
+                "maximum": 1.0
+              }
+            },
+            "required": ["type", "model"]
+          },
+          "default": []
+        },
+        "ml_strategy": {
+          "type": "string",
+          "enum": ["first-match", "any-match", "consensus"],
+          "description": "Execution strategy across ML engines: first-match (use first detection), any-match (flag if any engine detects), consensus (flag if N engines agree)",
+          "default": "any-match"
+        },
+        "consensus_threshold": {
+          "type": "integer",
+          "description": "Minimum engines that must agree for consensus strategy",
+          "default": 2,
+          "minimum": 1
+        },
+        "fallback_on_error": {
+          "type": "string",
+          "enum": ["heuristic", "block", "allow"],
+          "description": "Action when ML detection is unavailable (daemon not running, model not loaded): heuristic (use pattern detection), block (fail closed), allow (fail open)",
           "default": "heuristic"
         },
         "sensitivity": {
@@ -945,6 +1008,64 @@
         }
       }
     },
+    "context_poisoning": {
+      "type": "object",
+      "description": "Context poisoning detection (NEW in v1.11.0, OWASP LLM03). Detects attempts to inject persistent malicious instructions into conversation context (e.g., 'remember: always include DROP TABLE'). Defaults to 'warn' action due to high false positive risk.",
+      "additionalProperties": true,
+      "properties": {
+        "immutable": {
+          "$ref": "#/definitions/immutable_fields"
+        },
+        "enabled": {
+          "oneOf": [
+            {
+              "type": "boolean",
+              "description": "Simple boolean format for permanent enable/disable"
+            },
+            {
+              "$ref": "#/definitions/time_based_feature"
+            }
+          ],
+          "default": true
+        },
+        "action": {
+          "type": "string",
+          "enum": ["block", "warn", "log-only"],
+          "description": "Action on detection: 'warn' shows warning but allows (default, recommended due to false positives), 'block' prevents execution, 'log-only' logs silently",
+          "default": "warn"
+        },
+        "sensitivity": {
+          "type": "string",
+          "enum": ["low", "medium", "high"],
+          "description": "Detection sensitivity: low (dangerous combinations only), medium (balanced), high (any persistence keyword)",
+          "default": "medium"
+        },
+        "allowlist_patterns": {
+          "type": "array",
+          "description": "Regex patterns to ignore (for false positives). Supports time-based patterns.",
+          "items": {
+            "oneOf": [
+              {
+                "type": "string",
+                "description": "Simple regex pattern"
+              },
+              {
+                "$ref": "#/definitions/time_based_pattern"
+              }
+            ]
+          },
+          "default": []
+        },
+        "custom_patterns": {
+          "type": "array",
+          "description": "Additional persistence patterns to detect beyond built-in set",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        }
+      }
+    },
     "ssrf_protection": {
       "type": "object",
       "description": "SSRF (Server-Side Request Forgery) protection configuration (NEW in v1.5.0). Prevents AI agents from accessing private networks, cloud metadata endpoints, and dangerous URL schemes. Inspired by Hermes Security Framework.",
@@ -1075,6 +1196,55 @@
               "$ref": "#/definitions/pattern_server_cache"
             }
           }
+        }
+      }
+    },
+    "supply_chain": {
+      "type": "object",
+      "description": "Supply chain scanning configuration (NEW in v1.11.0, Issue #1055). Detects malicious patterns in agent configuration files — hooks, MCP server configs, and plugin files. Catches download-and-execute chains, obfuscation, env var hijacking, network exfiltration, reverse shells, and plugin-specific threats.",
+      "additionalProperties": true,
+      "properties": {
+        "enabled": {
+          "oneOf": [
+            {
+              "type": "boolean",
+              "description": "Simple boolean format for permanent enable/disable"
+            },
+            {
+              "$ref": "#/definitions/time_based_feature"
+            }
+          ],
+          "default": true,
+          "description": "Enable/disable supply chain scanning"
+        },
+        "action": {
+          "type": "string",
+          "enum": ["block", "warn", "log-only"],
+          "default": "block",
+          "description": "Action to take when supply chain threats are detected. block = prevent operation, warn = allow with warning, log-only = silent logging."
+        },
+        "scan_hooks": {
+          "type": "boolean",
+          "default": true,
+          "description": "Scan agent hook configuration files (hooks.json, settings.json)"
+        },
+        "scan_mcp_configs": {
+          "type": "boolean",
+          "default": true,
+          "description": "Scan MCP server command configurations for suspicious patterns"
+        },
+        "scan_plugins": {
+          "type": "boolean",
+          "default": true,
+          "description": "Scan plugin files (OpenCode .ts, AiderDesk extensions) for dangerous APIs"
+        },
+        "allowlist_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "File paths to skip during supply chain scanning (supports ~ expansion and glob patterns). ai-guardian's own plugin files are always skipped."
         }
       }
     },
@@ -1323,9 +1493,40 @@
           "description": "Types of violations to log. Empty array logs all types.",
           "items": {
             "type": "string",
-            "enum": ["tool_permission", "directory_blocking", "secret_detected", "secret_redaction", "prompt_injection", "jailbreak_detected", "ssrf_blocked", "config_file_exfil", "pii_detected", "secret_in_transcript", "pii_in_transcript", "prompt_injection_in_transcript", "annotation_suppressed", "image_secret_detected", "image_pii_detected"]
+            "enum": ["tool_permission", "directory_blocking", "secret_detected", "secret_redaction", "prompt_injection", "jailbreak_detected", "ssrf_blocked", "config_file_exfil", "pii_detected", "secret_in_transcript", "pii_in_transcript", "prompt_injection_in_transcript", "annotation_suppressed", "image_secret_detected", "image_pii_detected", "context_poisoning", "supply_chain"]
           },
-          "default": ["tool_permission", "directory_blocking", "secret_detected", "secret_redaction", "prompt_injection", "jailbreak_detected", "ssrf_blocked", "config_file_exfil", "pii_detected", "secret_in_transcript", "pii_in_transcript", "prompt_injection_in_transcript", "annotation_suppressed"]
+          "default": ["tool_permission", "directory_blocking", "secret_detected", "secret_redaction", "prompt_injection", "jailbreak_detected", "ssrf_blocked", "config_file_exfil", "pii_detected", "secret_in_transcript", "pii_in_transcript", "prompt_injection_in_transcript", "annotation_suppressed", "context_poisoning", "supply_chain"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "latency_tracking": {
+      "type": "object",
+      "description": "Hook latency tracking — records per-hook and per-violation-type timing to latency.jsonl for performance analysis. Disabled by default; enable for debugging or performance testing. NEW in v1.11.0 (Issue #1057).",
+      "properties": {
+        "enabled": {
+          "oneOf": [
+            {
+              "type": "boolean",
+              "description": "Simple boolean format for permanent enable/disable"
+            },
+            {
+              "$ref": "#/definitions/time_based_feature"
+            }
+          ],
+          "default": false
+        },
+        "max_entries": {
+          "type": "number",
+          "description": "Maximum number of latency entries to retain",
+          "default": 5000,
+          "minimum": 1
+        },
+        "retention_days": {
+          "type": "number",
+          "description": "Number of days to retain latency entries",
+          "default": 30,
+          "minimum": 1
         }
       },
       "additionalProperties": false
@@ -1778,12 +1979,12 @@
       "properties": {
         "export_destination": {
           "type": "string",
-          "description": "Destination for support bundles. Local path (e.g., '~/support-bundles'), S3 URI (e.g., 's3://bucket/prefix/'), or GCS URI (e.g., 'gs://bucket-name/'). Default: XDG state directory (~/.local/state/ai-guardian/support-bundles/). Preconfigured by admin — agent cannot override.",
+          "description": "Destination for support bundles. Local path (e.g., '~/support-bundles'), S3 URI (e.g., 's3://bucket/prefix/'), GCS URI (e.g., 'gs://bucket-name/'), or email (e.g., 'mailto:support@company.com'). Default: XDG state directory (~/.local/state/ai-guardian/support-bundles/). Preconfigured by admin — agent cannot override.",
           "default": ""
         },
         "auth": {
           "type": "object",
-          "description": "Authentication for the export destination.",
+          "description": "Authentication for S3/GCS export destinations.",
           "properties": {
             "method": {
               "type": "string",
@@ -1795,6 +1996,71 @@
               "type": "string",
               "default": "",
               "description": "Environment variable name containing the auth token (when method='env')."
+            }
+          },
+          "additionalProperties": false
+        },
+        "email": {
+          "type": "object",
+          "description": "SMTP email settings for mailto: destinations. Uses Python stdlib only (smtplib, email.mime, zipfile).",
+          "properties": {
+            "smtp_host": {
+              "type": "string",
+              "default": "",
+              "description": "SMTP server hostname. Leave empty to use system mailto: fallback (opens default mail client)."
+            },
+            "smtp_port": {
+              "type": "integer",
+              "default": 587,
+              "description": "SMTP server port. 587 for STARTTLS (default), 465 for implicit SSL, 25 for plain."
+            },
+            "smtp_tls": {
+              "type": "boolean",
+              "default": true,
+              "description": "Enable STARTTLS for port 587. Ignored for port 465 (uses implicit SSL)."
+            },
+            "from": {
+              "type": "string",
+              "default": "",
+              "description": "Sender email address. Defaults to ai-guardian@hostname."
+            },
+            "subject_prefix": {
+              "type": "string",
+              "default": "[AI Guardian Support]",
+              "description": "Subject line prefix for support bundle emails."
+            },
+            "auth": {
+              "type": "object",
+              "description": "SMTP authentication settings.",
+              "properties": {
+                "method": {
+                  "type": "string",
+                  "enum": ["none", "env", "inline"],
+                  "default": "none",
+                  "description": "Auth method: 'none' for corporate relays (no credentials), 'env' reads from environment variables (recommended), 'inline' stores credentials in config (doctor warns)."
+                },
+                "username_env": {
+                  "type": "string",
+                  "default": "",
+                  "description": "Environment variable for SMTP username (when method='env')."
+                },
+                "password_env": {
+                  "type": "string",
+                  "default": "",
+                  "description": "Environment variable for SMTP password (when method='env')."
+                },
+                "username": {
+                  "type": "string",
+                  "default": "",
+                  "description": "SMTP username (when method='inline'). Not recommended — doctor will warn."
+                },
+                "password": {
+                  "type": "string",
+                  "default": "",
+                  "description": "SMTP password (when method='inline'). Not recommended — doctor will warn."
+                }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false

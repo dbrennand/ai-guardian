@@ -19,6 +19,8 @@ FEATURE_GROUPS = [
         ("prompt_injection", "Prompt Injection", "Detect and block prompt injection attacks"),
         ("ssrf_protection", "SSRF Protection", "Block requests to private networks and metadata"),
         ("config_file_scanning", "Config File Scanner", "Detect credential exfiltration in config files"),
+        ("context_poisoning", "Context Poisoning", "Detect context poisoning attempts"),
+        ("supply_chain", "Supply Chain", "Detect malicious patterns in agent config files"),
     ]),
     ("Response Protection", [
         ("secret_redaction", "Secret Redaction", "Redact secrets from tool outputs"),
@@ -30,6 +32,7 @@ FEATURE_GROUPS = [
     ]),
     ("Monitoring", [
         ("violation_logging", "Violation Logging", "Log blocked operations for audit"),
+        ("latency_tracking", "Latency Tracking", "Record per-hook timing to latency.jsonl"),
     ]),
 ]
 
@@ -40,6 +43,8 @@ FEATURE_ACTIONS = {
     "scan_pii": {"block": "Block", "redact": "Redact", "warn": "Warn", "log-only": "Log Only"},
     "secret_redaction": {"warn": "Warn", "log-only": "Log Only"},
     "image_scanning": {"block": "Block", "warn": "Warn", "log-only": "Log Only"},
+    "context_poisoning": {"block": "Block", "warn": "Warn", "log-only": "Log Only"},
+    "supply_chain": {"block": "Block", "warn": "Warn", "log-only": "Log Only"},
 }
 
 ACTION_DEFAULTS = {
@@ -49,6 +54,8 @@ ACTION_DEFAULTS = {
     "scan_pii": "block",
     "secret_redaction": "warn",
     "image_scanning": "block",
+    "context_poisoning": "warn",
+    "supply_chain": "block",
 }
 
 DURATION_RE = re.compile(r"^(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?$", re.IGNORECASE)
@@ -79,9 +86,10 @@ def _get_enabled(config, section):
         return True
     if section == "annotations":
         return config.get("annotations", {}).get("enabled", True)
+    default_enabled = False if section == "latency_tracking" else True
     val = config.get(section, {})
     if isinstance(val, dict):
-        enabled = val.get("enabled", True)
+        enabled = val.get("enabled", default_enabled)
         if isinstance(enabled, dict):
             disabled_until = enabled.get("disabled_until")
             if disabled_until:
@@ -92,9 +100,9 @@ def _get_enabled(config, section):
                 except (ValueError, TypeError):
                     pass
                 return True, None, ""
-            return enabled.get("value", True), None, ""
+            return enabled.get("value", default_enabled), None, ""
         return enabled, None, ""
-    return True, None, ""
+    return default_enabled, None, ""
 
 
 def _get_action(config, section):
@@ -196,12 +204,13 @@ def create_global_settings_page(service, daemon_name: str):
 
                             for section, label, desc in features:
                                 ui.separator().classes("my-1")
+                                ui.html(f'<div id="feature-{section}"></div>')
                                 raw = _get_enabled(config, section)
                                 if isinstance(raw, tuple) and len(raw) == 3:
                                     is_temp = raw[0] == "temp_disabled"
                                     until = raw[1]
                                     reason = raw[2]
-                                    is_enabled = not is_temp
+                                    is_enabled = bool(raw[0]) if not is_temp else False
                                 else:
                                     is_temp = False
                                     until = None
@@ -272,4 +281,13 @@ def create_global_settings_page(service, daemon_name: str):
 
                                         act_sel.on_value_change(on_action)
 
-            ui.timer(0.1, refresh, once=True)
+            async def _refresh_and_scroll():
+                await refresh()
+                await ui.run_javascript(
+                    'if (location.hash) {'
+                    '  const el = document.querySelector(location.hash);'
+                    '  if (el) el.scrollIntoView({behavior: "smooth", block: "center"});'
+                    '}'
+                )
+
+            ui.timer(0.1, _refresh_and_scroll, once=True)
