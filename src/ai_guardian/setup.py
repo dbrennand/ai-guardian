@@ -2090,6 +2090,8 @@ def _get_default_config_template(permissive: bool = False) -> Dict:
         "_comment_secret_scanning": "Scan for secrets (API keys, tokens, passwords). Supported engines: gitleaks, betterleaks, leaktk, trufflehog, detect-secrets, secretlint, gitguardian",
         "secret_scanning": {
             "enabled": True,
+            "_comment_action": "Action on detection: block (default), warn, log-only, ask (interactive prompt), ask:warn (ask with warn fallback), ask:log-only",
+            "action": "block",
             "ignore_files": [],
             "ignore_tools": [],
             "allowlist_patterns": [],
@@ -2125,7 +2127,11 @@ def _get_default_config_template(permissive: bool = False) -> Dict:
             "_comment_validate_secrets": "Secret liveness validation: check if detected secrets are still active (v1.11.0+). PRIVACY: sends secrets to provider APIs. Requires explicit opt-in.",
             "validate_secrets": False,
             "validation_timeout_ms": 3000,
-            "on_inactive": "warn"
+            "on_inactive": "warn",
+            "_comment_entropy": "Minimum Shannon entropy for secret matches. Range: 0.0 (identical chars) to ~6.0 (fully random). 3.0 filters placeholders while keeping real secrets (4.0+). Set to null to disable.",
+            "min_entropy": 3.0,
+            "_comment_stopwords": "Additional stopwords MERGED with bundled list (example, test, sample, placeholder, etc.). Never replaces bundled words. Case-insensitive substring match. Min word length: 3.",
+            "stopwords": []
         },
 
         "_comment_prompt_injection": "Detect and block prompt injection attacks that try to manipulate AI behavior",

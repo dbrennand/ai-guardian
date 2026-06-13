@@ -2294,10 +2294,6 @@ class DaemonTray:
             ),
             pystray.MenuItem("Start daemon", _restart_action,
                              visible=_single_not_running),
-            pystray.MenuItem("Stop daemon", _stop_action,
-                             visible=_single_running),
-            pystray.MenuItem("Restart daemon", _restart_action,
-                             visible=lambda _: self._is_single_daemon()),
             pystray.MenuItem(
                 lambda _: self._upgrade_label(
                     self._targets[0] if self._targets else None,
@@ -2659,13 +2655,6 @@ class DaemonTray:
                                     "running", "paused"
                                 )
                             ),
-                        ),
-                        pystray.MenuItem(
-                            "Stop daemon", _mk_stop(),
-                            visible=_is_slot_running,
-                        ),
-                        pystray.MenuItem(
-                            "Restart daemon", _mk_restart(),
                         ),
                         pystray.MenuItem(
                             lambda _i, s=idx: self._upgrade_label(
