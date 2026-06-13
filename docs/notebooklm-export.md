@@ -532,7 +532,7 @@ Each agent uses different event names. The adapter layer normalizes these.
 | Cline | JSON `cancel` field | `{"cancel": true, "reason": "..."}` |
 | Kiro | Exit code 1 + stderr | stderr = error message |
 | Windsurf | Same as Claude Code | Same as Claude Code |
-| Codex | Same as Claude Code | Same as Claude Code |
+| Codex | Same as Claude Code + `PermissionRequest` deny response | Same as Claude Code + `{"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "deny", "message": "..."}}}` |
 | OpenCode | Same as Claude Code | Same as Claude Code |
 
 ## Architecture
@@ -609,7 +609,7 @@ Agent names: `claude`, `cursor`, `copilot`, `codex`, `windsurf`, `gemini`, `clin
 | Claude Code | `~/.claude/settings.json` |
 | Cursor | `~/.cursor/hooks.json` |
 | GitHub Copilot | `~/.github/hooks/hooks.json` |
-| OpenAI Codex | `~/.codex/hooks.json` |
+| OpenAI Codex | `~/.codex/config.toml` (canonical), `~/.codex/hooks.json` (legacy compatibility) |
 | Windsurf | `~/.codeium/windsurf/hooks.json` |
 | Gemini CLI | `~/.gemini/settings.json` |
 | Cline / ZooCode | `.clinerules/hooks/` (scripts) |

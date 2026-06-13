@@ -548,8 +548,9 @@ class TestResponseFormatting:
             hook_event=HookEvent.PERMISSION_REQUEST,
         )
         data = json.loads(result["output"])
-        assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
         assert data["hookSpecificOutput"]["hookEventName"] == "PermissionRequest"
+        assert data["hookSpecificOutput"]["decision"]["behavior"] == "deny"
+        assert data["hookSpecificOutput"]["decision"]["message"] == "Blocked by policy"
         assert "Blocked by policy" in data["systemMessage"]
 
     def test_codex_permission_request_allow_passes_through(self):

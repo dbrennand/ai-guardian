@@ -142,6 +142,10 @@ def parse_simulation_result(result):
         if hso.get("permissionDecision") == "deny":
             is_blocked = True
             reason = output.get("systemMessage")
+        decision = hso.get("decision")
+        if isinstance(decision, dict) and decision.get("behavior") == "deny":
+            is_blocked = True
+            reason = decision.get("message") or output.get("systemMessage")
         if "updatedToolOutput" in hso:
             redacted_output = hso["updatedToolOutput"]
     if not is_blocked and output.get("permission") == "deny":

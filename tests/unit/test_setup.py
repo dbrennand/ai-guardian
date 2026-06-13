@@ -1030,6 +1030,30 @@ timeout = 30
         assert pre_tool_hooks[1]['command'] == 'other-tool'
         assert len(warnings) > 0
 
+    def test_merge_hooks_codex_preserves_other_matchers(self):
+        """Codex merge keeps unmatched user hooks instead of replacing the whole event."""
+        setup = IDESetup()
+        existing_config = {
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "^Bash$",
+                        "hooks": [{"type": "command", "command": "bash-only-hook"}],
+                    }
+                ]
+            }
+        }
+
+        merged, _warnings = setup.merge_hooks(
+            existing_config,
+            IDESetup.IDE_CONFIGS["codex"]["hooks"],
+            "codex",
+        )
+
+        assert merged["hooks"]["PreToolUse"][0]["matcher"] == ".*"
+        assert merged["hooks"]["PreToolUse"][1]["matcher"] == "^Bash$"
+        assert merged["hooks"]["PreToolUse"][1]["hooks"][0]["command"] == "bash-only-hook"
+
     def test_check_hooks_configured_toml(self, tmp_path):
         setup = IDESetup()
         config_file = tmp_path / "config.toml"
@@ -1052,7 +1076,6 @@ timeout = 30
 
         assert success is True
         content = config_file.read_text()
-        assert "# BEGIN ai-guardian Codex hooks" in content
         assert "[[hooks.UserPromptSubmit]]" in content
         assert "[[hooks.PermissionRequest]]" in content
         parsed = tomllib.loads(content)
@@ -1072,6 +1095,157 @@ timeout = 30
         assert "[[hooks.PermissionRequest]]" in message
         assert not config_file.exists()
 
+    def test_setup_codex_hooks_merges_existing_inline_hooks(self, tmp_path):
+        setup = IDESetup()
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(
+            """
+model = "gpt-5"
+
+[[hooks.PreToolUse]]
+matcher = "^Bash$"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "bash-only-hook"
+timeout = 10
+""".strip()
+        )
+        ide_override = TestIDESetupParametrized._make_ide_config_override(setup, "codex", config_file)
+
+        with mock.patch.object(setup, "IDE_CONFIGS", ide_override):
+            with mock.patch.object(
+                setup,
+                "verify_gitleaks_installed",
+                return_value=(True, "Gitleaks installed"),
+            ):
+                success, _message = setup.setup_ide_hooks("codex", dry_run=False, force=False)
+
+        assert success is True
+        parsed = tomllib.loads(config_file.read_text())
+        assert parsed["model"] == "gpt-5"
+        assert parsed["hooks"]["PreToolUse"][0]["matcher"] == ".*"
+        assert parsed["hooks"]["PreToolUse"][1]["matcher"] == "^Bash$"
+        assert parsed["hooks"]["PreToolUse"][1]["hooks"][0]["command"] == "bash-only-hook"
+
+    def test_setup_codex_hooks_updates_existing_ai_guardian_entry_without_duplication(self, tmp_path):
+        setup = IDESetup()
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(
+            """
+[[hooks.PreToolUse]]
+matcher = ".*"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "/old/path/ai-guardian"
+timeout = 5
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "other-tool"
+timeout = 10
+""".strip()
+        )
+        ide_override = TestIDESetupParametrized._make_ide_config_override(setup, "codex", config_file)
+
+        with mock.patch.object(setup, "IDE_CONFIGS", ide_override):
+            with mock.patch("ai_guardian.setup._resolve_binary_path", return_value="/new/path/ai-guardian"):
+                with mock.patch.object(
+                    setup,
+                    "verify_gitleaks_installed",
+                    return_value=(True, "Gitleaks installed"),
+                ):
+                    success, _message = setup.setup_ide_hooks("codex", dry_run=False, force=False)
+
+        assert success is True
+        parsed = tomllib.loads(config_file.read_text())
+        hooks = parsed["hooks"]["PreToolUse"][0]["hooks"]
+        ai_guardian_commands = [hook["command"] for hook in hooks if "ai-guardian" in hook["command"]]
+        assert ai_guardian_commands == ["/new/path/ai-guardian"]
+        assert hooks[1]["command"] == "other-tool"
+
+    def test_setup_codex_hooks_retires_ai_guardian_only_legacy_hooks(self, tmp_path):
+        setup = IDESetup()
+        config_file = tmp_path / "config.toml"
+        legacy_file = tmp_path / "hooks.json"
+        legacy_file.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "PreToolUse": [
+                            {
+                                "matcher": ".*",
+                                "hooks": [{"type": "command", "command": "ai-guardian"}],
+                            }
+                        ]
+                    }
+                }
+            )
+        )
+        ide_override = TestIDESetupParametrized._make_ide_config_override(
+            setup,
+            "codex",
+            config_file,
+            legacy_config_path=str(legacy_file),
+        )
+
+        with mock.patch.object(setup, "IDE_CONFIGS", ide_override):
+            with mock.patch.object(
+                setup,
+                "verify_gitleaks_installed",
+                return_value=(True, "Gitleaks installed"),
+            ):
+                success, message = setup.setup_ide_hooks("codex", dry_run=False, force=False)
+
+        assert success is True
+        assert not legacy_file.exists()
+        assert legacy_file.with_name("hooks.json.backup").exists()
+        assert "Legacy Codex hooks retired" in message
+
+    def test_setup_codex_hooks_strips_ai_guardian_from_mixed_legacy_file(self, tmp_path):
+        setup = IDESetup()
+        config_file = tmp_path / "config.toml"
+        legacy_file = tmp_path / "hooks.json"
+        legacy_file.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "PreToolUse": [
+                            {
+                                "matcher": ".*",
+                                "hooks": [
+                                    {"type": "command", "command": "ai-guardian"},
+                                    {"type": "command", "command": "other-tool"},
+                                ],
+                            }
+                        ]
+                    }
+                }
+            )
+        )
+        ide_override = TestIDESetupParametrized._make_ide_config_override(
+            setup,
+            "codex",
+            config_file,
+            legacy_config_path=str(legacy_file),
+        )
+
+        with mock.patch.object(setup, "IDE_CONFIGS", ide_override):
+            with mock.patch.object(
+                setup,
+                "verify_gitleaks_installed",
+                return_value=(True, "Gitleaks installed"),
+            ):
+                success, message = setup.setup_ide_hooks("codex", dry_run=False, force=False)
+
+        assert success is True
+        legacy_config = json.loads(legacy_file.read_text())
+        hooks = legacy_config["hooks"]["PreToolUse"][0]["hooks"]
+        assert [hook["command"] for hook in hooks] == ["other-tool"]
+        assert legacy_file.with_name("hooks.json.backup").exists()
+        assert "non-ai-guardian hooks" in message
+
     def test_setup_codex_hooks_force_overwrite_creates_backup(self, tmp_path):
         setup = IDESetup()
         config_file = tmp_path / "config.toml"
@@ -1087,11 +1261,12 @@ timeout = 30
     def test_setup_codex_hooks_already_configured(self, tmp_path):
         setup = IDESetup()
         config_file = tmp_path / "config.toml"
-        config_file.write_text(self._CONFIGURED_TOML)
+        config_file.write_text(_render_codex_hooks_toml(IDESetup.IDE_CONFIGS["codex"]["hooks"]))
         ide_override = TestIDESetupParametrized._make_ide_config_override(setup, "codex", config_file)
 
         with mock.patch.object(setup, "IDE_CONFIGS", ide_override):
-            success, message = setup.setup_ide_hooks("codex", dry_run=False, force=False)
+            with mock.patch("ai_guardian.setup._resolve_binary_path", return_value="ai-guardian"):
+                success, message = setup.setup_ide_hooks("codex", dry_run=False, force=False)
 
         assert success is False
         assert "already configured" in message
@@ -1136,6 +1311,71 @@ timeout = 30
         server = parsed["mcp_servers"]["ai-guardian"]
         assert server["command"] == command
         assert server["args"] == args
+
+    def test_install_codex_mcp_merges_existing_servers(self, tmp_path):
+        from ai_guardian.setup import _install_mcp_config, _MCP_IDE_CONFIGS
+
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(
+            """
+[mcp_servers.docs]
+command = "docs-server"
+args = ["serve"]
+""".strip()
+        )
+        setup = IDESetup()
+
+        with mock.patch.dict(
+            _MCP_IDE_CONFIGS,
+            {"codex": {**_MCP_IDE_CONFIGS["codex"], "config_file": str(config_file)}},
+        ):
+            with mock.patch("ai_guardian.setup._resolve_binary_path", return_value="/mock/bin/ai-guardian"):
+                _install_mcp_config(setup, "codex", dry_run=False)
+
+        parsed = tomllib.loads(config_file.read_text())
+        assert parsed["mcp_servers"]["docs"]["command"] == "docs-server"
+        assert parsed["mcp_servers"]["ai-guardian"]["command"] == "/mock/bin/ai-guardian"
+
+    def test_install_codex_mcp_updates_existing_ai_guardian_entry(self, tmp_path):
+        from ai_guardian.setup import _install_mcp_config, _MCP_IDE_CONFIGS
+
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(
+            """
+[mcp_servers.ai-guardian]
+command = "old-path"
+args = ["old-arg"]
+""".strip()
+        )
+        setup = IDESetup()
+
+        with mock.patch.dict(
+            _MCP_IDE_CONFIGS,
+            {"codex": {**_MCP_IDE_CONFIGS["codex"], "config_file": str(config_file)}},
+        ):
+            with mock.patch("ai_guardian.setup._resolve_binary_path", return_value="/mock/bin/ai-guardian"):
+                _install_mcp_config(setup, "codex", dry_run=False)
+
+        parsed = tomllib.loads(config_file.read_text())
+        assert parsed["mcp_servers"]["ai-guardian"]["command"] == "/mock/bin/ai-guardian"
+        assert parsed["mcp_servers"]["ai-guardian"]["args"] == ["mcp-server"]
+
+    def test_install_codex_mcp_invalid_toml_skips_write(self, tmp_path, capsys):
+        from ai_guardian.setup import _install_mcp_config, _MCP_IDE_CONFIGS
+
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("[mcp_servers.ai-guardian]\ncommand = ")
+        setup = IDESetup()
+
+        with mock.patch.dict(
+            _MCP_IDE_CONFIGS,
+            {"codex": {**_MCP_IDE_CONFIGS["codex"], "config_file": str(config_file)}},
+        ):
+            _install_mcp_config(setup, "codex", dry_run=False)
+
+        captured = capsys.readouterr()
+        assert "Could not parse" in captured.out
+        assert config_file.read_text() == "[mcp_servers.ai-guardian]\ncommand = "
 
 
 class TestGeminiSetup:

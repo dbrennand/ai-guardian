@@ -29,6 +29,7 @@ AGENT_CONFIG_PATHS_HOME = [
     ".claude/settings.local.json",
     ".cursor/hooks.json",
     ".github/hooks/hooks.json",
+    ".codex/config.toml",
     ".codex/hooks.json",
     ".codeium/windsurf/hooks.json",
     ".gemini/settings.json",
@@ -41,6 +42,8 @@ AGENT_CONFIG_PATHS_PROJECT = [
     ".claude/commands/*.md",
     ".cursor/hooks.json",
     ".github/hooks/hooks.json",
+    ".codex/config.toml",
+    ".codex/hooks.json",
 ]
 
 PLUGIN_PATHS_HOME = [

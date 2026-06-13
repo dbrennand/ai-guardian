@@ -187,6 +187,21 @@ class TestParseSimulationResult:
         assert parsed["decision"] == "BLOCKED"
         assert parsed["reason"] == "Secret found"
 
+    def test_codex_permission_request_blocked_response(self):
+        response = {
+            "hookSpecificOutput": {
+                "hookEventName": "PermissionRequest",
+                "decision": {
+                    "behavior": "deny",
+                    "message": "Blocked by repository policy.",
+                },
+            }
+        }
+        result = {"output": json.dumps(response), "exit_code": 0}
+        parsed = parse_simulation_result(result)
+        assert parsed["decision"] == "BLOCKED"
+        assert parsed["reason"] == "Blocked by repository policy."
+
     def test_invalid_json_output(self):
         result = {"output": "not-json{{{", "exit_code": 0}
         parsed = parse_simulation_result(result)

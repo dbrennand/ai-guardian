@@ -149,7 +149,7 @@ Each agent uses different event names. The adapter layer normalizes these.
 | Cline | JSON `cancel` field | `{"cancel": true, "reason": "..."}` |
 | Kiro | Exit code 1 + stderr | stderr = error message |
 | Windsurf | Same as Claude Code | Same as Claude Code |
-| Codex | Same as Claude Code + `PermissionRequest` deny response | Same as Claude Code + `{"hookSpecificOutput": {"hookEventName": "PermissionRequest", "permissionDecision": "deny"}}` |
+| Codex | Same as Claude Code + `PermissionRequest` deny response | Same as Claude Code + `{"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "deny", "message": "..."}}}` |
 | OpenCode | Same as Claude Code | Same as Claude Code |
 
 ## Architecture

@@ -96,8 +96,10 @@ class CodexAdapter(ClaudeCodeAdapter):
             response = {
                 "hookSpecificOutput": {
                     "hookEventName": "PermissionRequest",
-                    "permissionDecision": "deny",
-                    "permissionDecisionReason": final_error,
+                    "decision": {
+                        "behavior": "deny",
+                        "message": final_error,
+                    },
                 },
                 "systemMessage": final_error,
             }

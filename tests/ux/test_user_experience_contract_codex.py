@@ -123,7 +123,8 @@ class UserExperienceContractCodexTests(TestCase):
 
         response = json.loads(result["output"])
         assert result["exit_code"] == 0
-        assert response["hookSpecificOutput"]["permissionDecision"] == "deny"
         assert response["hookSpecificOutput"]["hookEventName"] == "PermissionRequest"
+        assert response["hookSpecificOutput"]["decision"]["behavior"] == "deny"
+        assert response["hookSpecificOutput"]["decision"]["message"] == "Blocked by policy: approval denied"
         assert response["systemMessage"] == "Blocked by policy: approval denied"
         assert "bypass" not in response["systemMessage"].lower()

@@ -7,6 +7,7 @@ with support for remote configuration URLs.
 """
 
 import contextlib
+import copy
 import io
 import json
 import logging
@@ -163,54 +164,33 @@ def _notify_daemon_reload():
         pass
 
 
-_CODEX_MANAGED_HOOKS_BEGIN = "# BEGIN ai-guardian Codex hooks"
-_CODEX_MANAGED_HOOKS_END = "# END ai-guardian Codex hooks"
-_CODEX_MANAGED_MCP_BEGIN = "# BEGIN ai-guardian Codex MCP"
-_CODEX_MANAGED_MCP_END = "# END ai-guardian Codex MCP"
-
-
-def _strip_managed_block(text: str, begin_marker: str, end_marker: str) -> str:
-    """Remove a previously managed text block delimited by comment markers."""
-    start = text.find(begin_marker)
-    if start == -1:
-        return text
-    end = text.find(end_marker, start)
-    if end == -1:
-        return text[:start].rstrip() + "\n"
-    end += len(end_marker)
-    stripped = (text[:start] + text[end:]).strip()
-    return f"{stripped}\n" if stripped else ""
+def _unique_backup_path(path: Path) -> Path:
+    """Return a non-conflicting backup path beside *path*."""
+    candidate = path.with_name(f"{path.name}.backup")
+    index = 1
+    while candidate.exists():
+        candidate = path.with_name(f"{path.name}.backup.{index}")
+        index += 1
+    return candidate
 
 
 def _render_codex_hooks_toml(hooks_config: Dict[str, List[Dict]]) -> str:
     """Render ai-guardian's managed Codex hooks as inline TOML tables."""
-    return "\n".join(
-        [
-            _CODEX_MANAGED_HOOKS_BEGIN,
-            tomli_w.dumps({"hooks": hooks_config}).strip(),
-            _CODEX_MANAGED_HOOKS_END,
-        ]
-    ).strip() + "\n"
+    return tomli_w.dumps({"hooks": hooks_config})
 
 
 def _render_codex_mcp_toml(command: str, args: List[str]) -> str:
     """Render ai-guardian's Codex MCP server block as inline TOML."""
-    return "\n".join(
-        [
-            _CODEX_MANAGED_MCP_BEGIN,
-            tomli_w.dumps(
-                {
-                    "mcp_servers": {
-                        "ai-guardian": {
-                            "command": command,
-                            "args": args,
-                        }
-                    }
+    return tomli_w.dumps(
+        {
+            "mcp_servers": {
+                "ai-guardian": {
+                    "command": command,
+                    "args": args,
                 }
-            ).strip(),
-            _CODEX_MANAGED_MCP_END,
-        ]
-    ).strip() + "\n"
+            }
+        }
+    )
 
 
 class IDESetup:
@@ -677,59 +657,196 @@ class IDESetup:
                     return 0
         return 0
 
+    def _load_codex_toml_config(self, config_path: Path) -> Tuple[Optional[Dict], Optional[str]]:
+        """Load Codex TOML config if it exists."""
+        if not config_path.exists():
+            return {}, None
+        try:
+            with open(config_path, "rb") as f:
+                return tomllib.load(f), None
+        except Exception as e:
+            return None, f"Invalid TOML in {config_path}: {e}"
+
+    def _load_codex_legacy_hooks(self, legacy_path: Path) -> Tuple[Optional[Dict], Optional[str]]:
+        """Load legacy Codex hooks.json if it exists."""
+        if not legacy_path.exists():
+            return {}, None
+        try:
+            with open(legacy_path, "r", encoding="utf-8") as f:
+                return json.load(f), None
+        except Exception as e:
+            return None, f"Invalid legacy Codex hooks in {legacy_path}: {e}"
+
+    def _strip_ai_guardian_codex_legacy_hooks(
+        self, legacy_config: Dict
+    ) -> Tuple[Dict, bool, bool]:
+        """Remove ai-guardian hooks from a legacy Codex hooks.json payload."""
+        filtered = copy.deepcopy(legacy_config)
+        hooks = filtered.get("hooks")
+        removed_ai_guardian = False
+        has_remaining_hooks = False
+
+        if isinstance(hooks, dict):
+            for hook_name in list(hooks.keys()):
+                hook_list = hooks.get(hook_name)
+                if not isinstance(hook_list, list):
+                    if hook_list:
+                        has_remaining_hooks = True
+                    continue
+
+                new_hook_list = []
+                for entry in hook_list:
+                    if not isinstance(entry, dict):
+                        new_hook_list.append(entry)
+                        has_remaining_hooks = True
+                        continue
+
+                    entry_hooks = entry.get("hooks")
+                    if not isinstance(entry_hooks, list):
+                        new_hook_list.append(entry)
+                        has_remaining_hooks = True
+                        continue
+
+                    remaining_hooks = []
+                    for hook in entry_hooks:
+                        if isinstance(hook, dict) and _is_ai_guardian_command(hook.get("command", "")):
+                            removed_ai_guardian = True
+                            continue
+                        remaining_hooks.append(hook)
+
+                    if remaining_hooks:
+                        updated_entry = copy.deepcopy(entry)
+                        updated_entry["hooks"] = remaining_hooks
+                        new_hook_list.append(updated_entry)
+                        has_remaining_hooks = True
+
+                if new_hook_list:
+                    hooks[hook_name] = new_hook_list
+                else:
+                    hooks.pop(hook_name, None)
+
+            if not hooks:
+                filtered.pop("hooks", None)
+
+        has_other_top_level_content = any(
+            key != "hooks" and value not in ({}, [], None, "")
+            for key, value in filtered.items()
+        )
+        return filtered, removed_ai_guardian, has_remaining_hooks or has_other_top_level_content
+
+    def _retire_codex_legacy_hooks(self, legacy_path: Path) -> Path:
+        """Rename legacy Codex hooks.json out of the active location."""
+        retired_path = _unique_backup_path(legacy_path)
+        legacy_path.rename(retired_path)
+        return retired_path
+
     def _setup_codex_hooks(
         self,
         ide_config: Dict,
         config_path: Path,
         dry_run: bool = False,
+        force: bool = False,
     ) -> Tuple[bool, str]:
-        """Setup Codex hooks in ~/.codex/config.toml without rewriting user config."""
+        """Setup Codex hooks in ~/.codex/config.toml with parsed TOML merging."""
         ide_name = ide_config["name"]
-        existing_text = ""
-
-        if config_path.exists():
-            try:
-                with open(config_path, "rb") as f:
-                    tomllib.load(f)
-                existing_text = config_path.read_text(encoding="utf-8")
-            except Exception as e:
-                return False, f"Invalid TOML in {config_path}: {e}"
+        existing_config, config_error = self._load_codex_toml_config(config_path)
+        if config_error:
+            return False, config_error
 
         abs_path = _resolve_binary_path()
         resolved_hooks = _substitute_command(ide_config["hooks"], abs_path)
-        managed_block = _render_codex_hooks_toml(resolved_hooks)
-        base_text = _strip_managed_block(
-            existing_text,
-            _CODEX_MANAGED_HOOKS_BEGIN,
-            _CODEX_MANAGED_HOOKS_END,
-        ).rstrip()
-        merged_text = f"{base_text}\n\n{managed_block}" if base_text else managed_block
+        merged_config, warnings = self.merge_hooks(
+            copy.deepcopy(existing_config),
+            resolved_hooks,
+            "codex",
+        )
 
         self._last_merged_config = {"hooks": resolved_hooks}
+        merged_text = tomli_w.dumps(merged_config)
+        config_changed = merged_config != existing_config
+
+        legacy_path_value = self.get_legacy_config_path("codex")
+        legacy_path = Path(legacy_path_value).expanduser() if legacy_path_value else None
+        legacy_removed = False
+        legacy_kept = False
+        legacy_invalid_warning = None
+        legacy_backup_path = None
+        retired_legacy_path = None
+        legacy_cleanup_text = None
+        filtered_legacy_config = None
+
+        if legacy_path and legacy_path.exists():
+            legacy_config, legacy_error = self._load_codex_legacy_hooks(legacy_path)
+            if legacy_error:
+                legacy_invalid_warning = (
+                    "  Warning: Detected legacy Codex hooks at ~/.codex/hooks.json, "
+                    "but the file could not be parsed. Review it manually to avoid duplicate hooks.\n"
+                )
+            else:
+                filtered_legacy_config, legacy_removed, legacy_kept = (
+                    self._strip_ai_guardian_codex_legacy_hooks(legacy_config)
+                )
+                if legacy_removed and not legacy_kept:
+                    legacy_cleanup_text = (
+                        "  Legacy Codex hooks retired from ~/.codex/hooks.json after migration.\n"
+                    )
+                elif legacy_removed and legacy_kept:
+                    legacy_cleanup_text = (
+                        "  Legacy Codex hooks file still exists because it contains non-ai-guardian hooks.\n"
+                        "  ai-guardian entries will be removed from ~/.codex/hooks.json to avoid duplicate execution.\n"
+                    )
+
+        if not dry_run and not legacy_removed and not config_changed and not force:
+            return False, f"ai-guardian hooks already configured for {ide_name}. Use --force to overwrite."
 
         if dry_run:
             message = f"[DRY RUN] Would configure {ide_name} hooks at {config_path}:\n"
             message += merged_text
+            if warnings:
+                message += "\nWarnings:\n" + "\n".join(warnings) + "\n"
+            if legacy_cleanup_text:
+                message += "\n" + legacy_cleanup_text
+            if legacy_invalid_warning:
+                message += "\n" + legacy_invalid_warning
             return True, message
 
-        if config_path.exists():
+        if config_path.exists() and (config_changed or force):
             backup_path = self.backup_config(config_path)
             if backup_path:
                 print(f"✓ Backup created: {backup_path}", file=sys.stderr)
 
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        config_path.write_text(merged_text if merged_text.endswith("\n") else f"{merged_text}\n", encoding="utf-8")
+        if config_changed or not config_path.exists() or force:
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(
+                merged_text if merged_text.endswith("\n") else f"{merged_text}\n",
+                encoding="utf-8",
+            )
+
+        if legacy_path and legacy_removed:
+            if legacy_kept:
+                legacy_backup_path = self.backup_config(legacy_path)
+                if legacy_backup_path:
+                    print(f"✓ Backup created: {legacy_backup_path}", file=sys.stderr)
+                legacy_path.write_text(
+                    json.dumps(filtered_legacy_config, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+            else:
+                retired_legacy_path = self._retire_codex_legacy_hooks(legacy_path)
 
         gitleaks_installed, gitleaks_message = self.verify_gitleaks_installed()
         message = f"✓ Successfully configured {ide_name} hooks at {config_path}\n"
         message += f"\n  {gitleaks_message}\n"
-
-        legacy_path = self.get_legacy_config_path("codex")
-        if legacy_path and Path(legacy_path).expanduser().exists():
-            message += (
-                "\n  Note: Detected legacy Codex hooks at ~/.codex/hooks.json.\n"
-                "  New installs now use ~/.codex/config.toml.\n"
-            )
+        if warnings:
+            message += "\n" + "\n".join(warnings) + "\n"
+        if legacy_cleanup_text:
+            message += "\n" + legacy_cleanup_text
+        if retired_legacy_path:
+            message += f"  Retired file: {retired_legacy_path}\n"
+        if legacy_backup_path:
+            message += f"  Backup created: {legacy_backup_path}\n"
+        if legacy_invalid_warning:
+            message += "\n" + legacy_invalid_warning
 
         if not gitleaks_installed:
             message += (
@@ -971,16 +1088,37 @@ class IDESetup:
                 matched_entry = None
                 matched_idx = -1
                 for idx, entry in enumerate(hook_list):
-                    if isinstance(entry, dict) and entry.get("matcher") == target_matcher:
+                    if not isinstance(entry, dict):
+                        continue
+                    entry_hooks = entry.get("hooks", [])
+                    if any(
+                        isinstance(hook, dict) and _is_ai_guardian_command(hook.get("command", ""))
+                        for hook in entry_hooks
+                    ):
                         matched_entry = entry
                         matched_idx = idx
                         break
 
                 if matched_entry is None:
-                    existing_config["hooks"][hook_name] = ai_guardian_hooks[hook_name]
+                    for idx, entry in enumerate(hook_list):
+                        if not isinstance(entry, dict):
+                            continue
+                        entry_matcher = entry.get("matcher")
+                        if entry_matcher == target_matcher or (
+                            target_matcher is None and "matcher" not in entry
+                        ):
+                            matched_entry = entry
+                            matched_idx = idx
+                            break
+
+                if matched_entry is None:
+                    existing_config["hooks"][hook_name] = [
+                        copy.deepcopy(template_entry),
+                        *hook_list,
+                    ]
                     continue
 
-                if "hooks" not in matched_entry:
+                if "hooks" not in matched_entry or not isinstance(matched_entry["hooks"], list):
                     matched_entry["hooks"] = []
 
                 hooks_array = matched_entry["hooks"]
@@ -990,7 +1128,12 @@ class IDESetup:
                         continue
                     other_hooks.append(hook)
 
-                ai_guardian_hook = template_entry["hooks"][0]
+                ai_guardian_hook = copy.deepcopy(template_entry["hooks"][0])
+                updated_entry = copy.deepcopy(matched_entry)
+                if "matcher" in template_entry:
+                    updated_entry["matcher"] = template_entry["matcher"]
+                else:
+                    updated_entry.pop("matcher", None)
 
                 if other_hooks:
                     hook_names = [h.get("command", "unknown") for h in other_hooks if isinstance(h, dict)]
@@ -999,8 +1142,9 @@ class IDESetup:
                         f"ai-guardian has been placed first to ensure warnings display correctly."
                     )
 
-                matched_entry["hooks"] = [ai_guardian_hook] + other_hooks
-                existing_config["hooks"][hook_name][matched_idx] = matched_entry
+                updated_entry["hooks"] = [ai_guardian_hook] + other_hooks
+                hook_list.pop(matched_idx)
+                hook_list.insert(0, updated_entry)
 
             return existing_config, warnings
 
@@ -1500,6 +1644,9 @@ class IDESetup:
                 )
                 return True, msg
 
+            if ide_type == "codex":
+                return self._setup_codex_hooks(ide_config, config_path, dry_run, force)
+
             # Check if hooks already configured
             if not force and self.check_hooks_configured(config_path, ide_type):
                 return False, f"ai-guardian hooks already configured for {ide_name}. Use --force to overwrite."
@@ -1515,9 +1662,6 @@ class IDESetup:
             # Script-based IDEs (Cline, ZooCode): create executable scripts
             if ide_config.get("script_based"):
                 return self._setup_script_based_hooks(ide_type, ide_config, config_path, dry_run)
-
-            if ide_type == "codex":
-                return self._setup_codex_hooks(ide_config, config_path, dry_run)
 
             # Load existing config or create new
             existing_config = {}
@@ -3122,24 +3266,26 @@ def _install_mcp_config(setup: IDESetup, ide_type: str, dry_run: bool = False) -
         return
 
     if mcp_ide.get("config_format") == "toml":
-        existing_text = ""
+        existing_config: Dict[str, Any] = {}
         if config_path.exists():
             try:
                 with open(config_path, "rb") as f:
-                    tomllib.load(f)
-                existing_text = config_path.read_text(encoding="utf-8")
+                    existing_config = tomllib.load(f)
             except Exception:
                 print(f"  MCP: Could not parse {config_path}, skipping MCP setup")
                 return
 
         abs_path = _resolve_binary_path()
-        managed_block = _render_codex_mcp_toml(abs_path, list(_MCP_SERVER_ENTRY["args"]))
-        base_text = _strip_managed_block(
-            existing_text,
-            _CODEX_MANAGED_MCP_BEGIN,
-            _CODEX_MANAGED_MCP_END,
-        ).rstrip()
-        merged_text = f"{base_text}\n\n{managed_block}" if base_text else managed_block
+        merged_config = copy.deepcopy(existing_config)
+        merged_config.setdefault("mcp_servers", {})
+        merged_config["mcp_servers"]["ai-guardian"] = {
+            "command": abs_path,
+            "args": list(_MCP_SERVER_ENTRY["args"]),
+        }
+        merged_text = tomli_w.dumps(merged_config)
+        if merged_config == existing_config:
+            print(f"  MCP: ai-guardian MCP server already configured in {config_path}")
+            return
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(merged_text if merged_text.endswith("\n") else f"{merged_text}\n", encoding="utf-8")
         print(f"  MCP: Added ai-guardian MCP server to {config_path}")
@@ -3511,6 +3657,13 @@ function runGuardian(hookData: Record<string, unknown>): GuardianResult {
         }
         if (inner.hookSpecificOutput?.permissionDecision === 'deny') {
           return { blocked: true, error: inner.systemMessage || 'Blocked by ai-guardian', output: stdout };
+        }
+        if (inner.hookSpecificOutput?.decision?.behavior === 'deny') {
+          return {
+            blocked: true,
+            error: inner.hookSpecificOutput.decision.message || inner.systemMessage || 'Blocked by ai-guardian',
+            output: stdout,
+          };
         }
       } catch {}
     }

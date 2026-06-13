@@ -177,6 +177,7 @@ class TestInstallScriptAgentDetection:
         "CLAUDE_CONFIG_DIR",
         ".cursor/hooks.json",
         ".github/hooks/hooks.json",
+        ".codex/config.toml",
         ".codex/hooks.json",
         ".codeium/windsurf/hooks.json",
         ".gemini/settings.json",
