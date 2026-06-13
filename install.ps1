@@ -150,8 +150,13 @@ function Detect-InstalledAgents {
     $copilotConfig = Join-Path $HOME ".github\hooks\hooks.json"
     if ((Test-Path $copilotConfig) -and (Select-String -Path $copilotConfig -Pattern "ai-guardian" -Quiet)) { $agents += "copilot" }
 
-    $codexConfig = Join-Path $HOME ".codex\hooks.json"
-    if ((Test-Path $codexConfig) -and (Select-String -Path $codexConfig -Pattern "ai-guardian" -Quiet)) { $agents += "codex" }
+    $codexConfig = Join-Path $HOME ".codex\config.toml"
+    $legacyCodexConfig = Join-Path $HOME ".codex\hooks.json"
+    if ((Test-Path $codexConfig) -and (Select-String -Path $codexConfig -Pattern "ai-guardian" -Quiet)) {
+        $agents += "codex"
+    } elseif ((Test-Path $legacyCodexConfig) -and (Select-String -Path $legacyCodexConfig -Pattern "ai-guardian" -Quiet)) {
+        $agents += "codex"
+    }
 
     $windsurfConfig = Join-Path $HOME ".codeium\windsurf\hooks.json"
     if ((Test-Path $windsurfConfig) -and (Select-String -Path $windsurfConfig -Pattern "ai-guardian" -Quiet)) { $agents += "windsurf" }

@@ -220,6 +220,7 @@ class TestAdapterRegistry:
 
     def test_get_adapter_by_ide_type(self):
         assert isinstance(get_adapter_by_ide_type(IDEType.CLAUDE_CODE), ClaudeCodeAdapter)
+        assert isinstance(get_adapter_by_ide_type(IDEType.CODEX), CodexAdapter)
         assert isinstance(get_adapter_by_ide_type(IDEType.CURSOR), CursorAdapter)
         assert isinstance(get_adapter_by_ide_type(IDEType.GITHUB_COPILOT), CopilotAdapter)
         assert isinstance(get_adapter_by_ide_type(IDEType.GEMINI_CLI), GeminiCLIAdapter)
@@ -282,6 +283,10 @@ class TestAutoDetection:
     def test_detect_kiro_from_kiro_version(self):
         adapter = detect_adapter({"kiro_version": "1.0.0"})
         assert isinstance(adapter, KiroAdapter)
+
+    def test_detect_codex_from_permission_request(self):
+        adapter = detect_adapter({"hook_event_name": "PermissionRequest"})
+        assert isinstance(adapter, CodexAdapter)
 
     def test_detect_gemini_not_claude_with_transcript_path(self):
         """Claude Code data with transcript_path should NOT be detected as Gemini."""
@@ -479,7 +484,7 @@ class TestNormalization:
     def test_codex_shares_claude_format(self):
         adapter = CodexAdapter()
         assert adapter.name == "OpenAI Codex"
-        assert adapter.ide_type == IDEType.CLAUDE_CODE
+        assert adapter.ide_type == IDEType.CODEX
 
 
 # ── Response Formatting ─────────────────────────────────────────────────
@@ -535,6 +540,26 @@ class TestResponseFormatting:
         )
         data = json.loads(result["output"])
         assert data["hookSpecificOutput"]["updatedToolOutput"] == "redacted content"
+
+    def test_codex_permission_request_block(self):
+        result = CodexAdapter().format_response(
+            has_secrets=True,
+            error_message="Blocked by policy",
+            hook_event=HookEvent.PERMISSION_REQUEST,
+        )
+        data = json.loads(result["output"])
+        assert data["hookSpecificOutput"]["hookEventName"] == "PermissionRequest"
+        assert data["hookSpecificOutput"]["decision"]["behavior"] == "deny"
+        assert data["hookSpecificOutput"]["decision"]["message"] == "Blocked by policy"
+        assert "Blocked by policy" in data["systemMessage"]
+
+    def test_codex_permission_request_allow_passes_through(self):
+        result = CodexAdapter().format_response(
+            has_secrets=False,
+            hook_event=HookEvent.PERMISSION_REQUEST,
+        )
+        data = json.loads(result["output"])
+        assert data == {}
 
     def test_cursor_pretooluse_block(self):
         result = CursorAdapter().format_response(
@@ -741,7 +766,7 @@ class TestIDETypeProperties:
         assert CopilotAdapter().ide_type == IDEType.GITHUB_COPILOT
 
     def test_codex_ide_type(self):
-        assert CodexAdapter().ide_type == IDEType.CLAUDE_CODE
+        assert CodexAdapter().ide_type == IDEType.CODEX
 
     def test_windsurf_ide_type(self):
         assert WindsurfAdapter().ide_type == IDEType.CLAUDE_CODE
@@ -811,6 +836,11 @@ class TestBackwardCompatibility:
         from ai_guardian.response_format import detect_hook_event
         result = detect_hook_event({"hook_event_name": "PreToolUse"})
         assert result == HookEvent.PRE_TOOL_USE
+
+    def test_detect_hook_event_permission_request(self):
+        from ai_guardian.response_format import detect_hook_event
+        result = detect_hook_event({"hook_event_name": "PermissionRequest"})
+        assert result == HookEvent.PERMISSION_REQUEST
 
     def test_detect_hook_event_kiro(self):
         from ai_guardian.response_format import detect_hook_event

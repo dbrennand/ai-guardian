@@ -334,6 +334,10 @@ HOOKS_ONLY_BLOCKED = [
     pytest.param("Edit", "/home/user/.cursor/hooks.json", id="edit-cursor-hooks"),
     pytest.param("Write", "/home/user/.claude/hooks.json", id="write-claude-hooks"),
     pytest.param("Edit", "/home/user/.claude/hooks.json", id="edit-claude-hooks"),
+    pytest.param("Write", "/home/user/.codex/config.toml", id="write-codex-config"),
+    pytest.param("Edit", "/home/user/.codex/config.toml", id="edit-codex-config"),
+    pytest.param("Write", "/home/user/.codex/hooks.json", id="write-codex-hooks"),
+    pytest.param("Edit", "/home/user/.codex/hooks.json", id="edit-codex-hooks"),
 ]
 
 

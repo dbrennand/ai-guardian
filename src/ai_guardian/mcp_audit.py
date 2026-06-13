@@ -29,6 +29,11 @@ from pathlib import Path
 from ai_guardian.language_patterns import SKIP_DIRS
 from typing import Any, Dict, List, Optional
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
+    import tomli as tomllib  # type: ignore
+
 logger = logging.getLogger(__name__)
 
 
@@ -205,13 +210,17 @@ class MCPAuditor:
             if not path.exists():
                 continue
             try:
-                with open(path, "r") as f:
-                    data = json.load(f)
-            except (json.JSONDecodeError, OSError):
+                if path.suffix == ".toml":
+                    with open(path, "rb") as f:
+                        data = tomllib.load(f)
+                    mcp_servers = data.get("mcp_servers", {})
+                else:
+                    with open(path, "r") as f:
+                        data = json.load(f)
+                    mcp_servers = data.get("mcpServers", {})
+            except (json.JSONDecodeError, OSError, tomllib.TOMLDecodeError):
                 logger.debug("Could not read %s", path)
                 continue
-
-            mcp_servers = data.get("mcpServers", {})
             if not isinstance(mcp_servers, dict):
                 continue
 
@@ -263,10 +272,8 @@ class MCPAuditor:
         # Windsurf
         paths.append("~/.windsurf/mcp.json")
 
-        # Codex (project-local)
-        codex_local = Path.cwd() / "codex.json"
-        if codex_local.exists():
-            paths.append(str(codex_local))
+        # Codex
+        paths.append("~/.codex/config.toml")
 
         return paths
 
@@ -555,7 +562,7 @@ class MCPAuditor:
             return "Cursor"
         if ".windsurf/" in p:
             return "Windsurf"
-        if p.endswith("codex.json"):
+        if ".codex/config.toml" in p:
             return "Codex"
         return "Unknown"
 

@@ -40,6 +40,10 @@ WRITE_BLOCKED_PATHS = [
         id="cursor-hooks",
     ),
     pytest.param(
+        "/home/user/.codex/config.toml", None,
+        id="codex-config",
+    ),
+    pytest.param(
         "/usr/lib/python3.12/site-packages/ai_guardian/tool_policy.py", None,
         id="package-source-site-packages",
     ),
@@ -195,6 +199,10 @@ BASH_BLOCKED_COMMANDS = [
     pytest.param(
         "nano ~/.cursor/hooks.json",
         id="nano-on-cursor-hooks",
+    ),
+    pytest.param(
+        "vim ~/.codex/config.toml",
+        id="vim-on-codex-config",
     ),
     # echo/cat redirect
     pytest.param(
@@ -739,6 +747,11 @@ NO_TIP_CASES = [
         "Write",
         {"file_path": "/home/user/.claude/hooks.json"},
         id="ide-settings-no-ai-guardian",
+    ),
+    pytest.param(
+        "Write",
+        {"file_path": "/home/user/.codex/config.toml"},
+        id="codex-config-no-ai-guardian",
     ),
 ]
 

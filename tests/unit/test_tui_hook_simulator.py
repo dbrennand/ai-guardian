@@ -18,6 +18,8 @@ import pytest
 
 from ai_guardian.tui.hook_simulator import (
     HookSimulatorContent,
+    HOOK_EVENTS,
+    IDE_OPTIONS,
     build_hook_data,
     parse_simulation_result,
 )
@@ -75,6 +77,14 @@ class TestBuildHookData:
         assert result["hook_event_name"] == "PostToolUse"
         assert result["tool_name"] == "Bash"
         assert result["tool_response"]["output"] == "command output here"
+
+    def test_permission_request(self):
+        result = build_hook_data(
+            "PermissionRequest", tool_name="Bash", content="ls -la"
+        )
+        assert result["hook_event_name"] == "PermissionRequest"
+        assert result["approval_request_type"] == "Bash"
+        assert result["tool_use"]["parameters"]["command"] == "ls -la"
 
     def test_pretooluse_defaults_tool_name(self):
         result = build_hook_data("PreToolUse", content="test")
@@ -177,11 +187,35 @@ class TestParseSimulationResult:
         assert parsed["decision"] == "BLOCKED"
         assert parsed["reason"] == "Secret found"
 
+    def test_codex_permission_request_blocked_response(self):
+        response = {
+            "hookSpecificOutput": {
+                "hookEventName": "PermissionRequest",
+                "decision": {
+                    "behavior": "deny",
+                    "message": "Blocked by repository policy.",
+                },
+            }
+        }
+        result = {"output": json.dumps(response), "exit_code": 0}
+        parsed = parse_simulation_result(result)
+        assert parsed["decision"] == "BLOCKED"
+        assert parsed["reason"] == "Blocked by repository policy."
+
     def test_invalid_json_output(self):
         result = {"output": "not-json{{{", "exit_code": 0}
         parsed = parse_simulation_result(result)
         assert parsed["decision"] == "ALLOWED"
         assert parsed["reason"] == "not-json{{{"
+
+    def test_hook_events_include_permission_request(self):
+        assert ("PermissionRequest", "PermissionRequest") in HOOK_EVENTS
+
+    def test_ide_options_include_codex(self):
+        assert ("Codex", "codex") in IDE_OPTIONS
+
+    def test_ide_options_include_opencode(self):
+        assert ("OpenCode", "opencode") in IDE_OPTIONS
 
 
 class TestSimulationIsolation:

@@ -92,6 +92,8 @@ IMMUTABLE_DENY_PATTERNS = {
         # IDE hooks - ALWAYS protected (prevents disabling ai-guardian)
         # Note: */.claude/settings.json removed — handled by content-aware check (Issue #807)
         "*/.claude/hooks.json",
+        "*/.codex/config.toml",
+        "*/.codex/hooks.json",
         "*/.cursor/hooks.json",
         "*/Cursor/hooks.json",        # Windows
         "*/.github/hooks/hooks.json",         # GitHub Copilot
@@ -126,6 +128,8 @@ IMMUTABLE_DENY_PATTERNS = {
         # IDE hooks - ALWAYS protected (prevents disabling ai-guardian)
         # Note: */.claude/settings.json removed — handled by content-aware check (Issue #807)
         "*/.claude/hooks.json",
+        "*/.codex/config.toml",
+        "*/.codex/hooks.json",
         "*/.cursor/hooks.json",
         "*/Cursor/hooks.json",
         "*/.github/hooks/hooks.json",         # GitHub Copilot
@@ -171,6 +175,8 @@ IMMUTABLE_DENY_PATTERNS = {
         "*sed*.config/ai-guardian/*",  # Config directory
         "*sed*site-packages/ai_guardian*",  # Pip-installed package
         "*sed*.claude/settings.json*",
+        "*sed*.codex/config.toml*",
+        "*sed*.codex/hooks.json*",
         "*sed*.gemini/settings.json*",
         "*sed*.augment/settings.json*",
         "*sed*.cursor/hooks.json*",
@@ -187,6 +193,8 @@ IMMUTABLE_DENY_PATTERNS = {
         "*awk*.config/ai-guardian/*",  # Config directory
         "*awk*site-packages/ai_guardian*",  # Pip-installed package
         "*awk*.claude/settings.json*",
+        "*awk*.codex/config.toml*",
+        "*awk*.codex/hooks.json*",
         "*awk*.gemini/settings.json*",
         "*awk*.augment/settings.json*",
         "*awk*.cursor/hooks.json*",
@@ -202,6 +210,8 @@ IMMUTABLE_DENY_PATTERNS = {
         "*vim*ai-guardian.json*", "*vim*.ai-guardian.json*",  # Config files
         "*vim*.config/ai-guardian/*",  # Config directory
         "*vim*.claude/settings.json*",
+        "*vim*.codex/config.toml*",
+        "*vim*.codex/hooks.json*",
         "*vim*.gemini/settings.json*",
         "*vim*.augment/settings.json*",
         "*vim*.cursor/hooks.json*",
@@ -213,6 +223,8 @@ IMMUTABLE_DENY_PATTERNS = {
         "*nano*ai-guardian.json*", "*nano*.ai-guardian.json*",  # Config files
         "*nano*.config/ai-guardian/*",  # Config directory
         "*nano*.claude/settings.json*",
+        "*nano*.codex/config.toml*",
+        "*nano*.codex/hooks.json*",
         "*nano*.gemini/settings.json*",
         "*nano*.augment/settings.json*",
         "*nano*.cursor/hooks.json*",
@@ -227,6 +239,8 @@ IMMUTABLE_DENY_PATTERNS = {
         "*chmod*.config/ai-guardian/*",  # Config directory
         "*chmod*site-packages/ai_guardian*",  # Pip-installed package
         "*chmod*.claude/settings.json*",
+        "*chmod*.codex/config.toml*",
+        "*chmod*.codex/hooks.json*",
         "*chmod*.gemini/settings.json*",
         "*chmod*.augment/settings.json*",
         "*chmod*.cursor/hooks.json*",
@@ -241,7 +255,7 @@ IMMUTABLE_DENY_PATTERNS = {
         # chattr protection - specific paths only
         "*chattr*ai-guardian.json*", "*chattr*.ai-guardian.json*",  # Config files
         "*chattr*.config/ai-guardian/*",  # Config directory
-        "*chattr*.claude*", "*chattr*.cursor*",
+        "*chattr*.claude*", "*chattr*.codex*", "*chattr*.cursor*",
         "*chattr*.gemini*", "*chattr*.augment*",
         "*chattr*.github/hooks*",             # Copilot
         "*chattr*.codex*",                    # Codex
@@ -254,6 +268,8 @@ IMMUTABLE_DENY_PATTERNS = {
         "*>*.config/ai-guardian/*",  # Config directory
         "*>*site-packages/ai_guardian*",  # Pip-installed package
         "*>*.claude/settings.json*",
+        "*>*.codex/config.toml*",
+        "*>*.codex/hooks.json*",
         "*>*.gemini/settings.json*",
         "*>*.augment/settings.json*",
         "*>*.cursor/hooks.json*",
@@ -268,6 +284,8 @@ IMMUTABLE_DENY_PATTERNS = {
         # rm/mv protection - specific paths only
         "*rm*ai-guardian.json*",
         "*rm*.claude/settings.json*",
+        "*rm*.codex/config.toml*",
+        "*rm*.codex/hooks.json*",
         "*rm*.gemini/settings.json*",
         "*rm*.augment/settings.json*",
         "*rm*.cursor/hooks.json*",
@@ -280,6 +298,8 @@ IMMUTABLE_DENY_PATTERNS = {
         "*rm*.openclaw/plugins/ai-guardian*",       # OpenClaw
         "*mv*ai-guardian.json*",
         "*mv*.claude/settings.json*",
+        "*mv*.codex/config.toml*",
+        "*mv*.codex/hooks.json*",
         "*mv*.gemini/settings.json*",
         "*mv*.augment/settings.json*",
         "*mv*.cursor/hooks.json*",
@@ -381,21 +401,27 @@ IMMUTABLE_DENY_PATTERNS = {
 
         # Protect IDE settings/hook files (Unix paths)
         "*Remove-Item*.claude/settings.json*", "*Remove-Item*.cursor/hooks.json*",
+        "*Remove-Item*.codex/config.toml*", "*Remove-Item*.codex/hooks.json*",
         "*Remove-Item*Claude/settings.json*", "*Remove-Item*Cursor/hooks.json*",
         "*Remove-Item*.gemini/settings.json*", "*Remove-Item*.augment/settings.json*",
         "*Move-Item*.claude/settings.json*", "*Move-Item*.cursor/hooks.json*",
+        "*Move-Item*.codex/config.toml*", "*Move-Item*.codex/hooks.json*",
         "*Move-Item*Claude/settings.json*", "*Move-Item*Cursor/hooks.json*",
         "*Move-Item*.gemini/settings.json*", "*Move-Item*.augment/settings.json*",
         "*Rename-Item*.claude/settings.json*", "*Rename-Item*.cursor/hooks.json*",
+        "*Rename-Item*.codex/config.toml*", "*Rename-Item*.codex/hooks.json*",
         "*Rename-Item*Claude/settings.json*", "*Rename-Item*Cursor/hooks.json*",
         "*Rename-Item*.gemini/settings.json*", "*Rename-Item*.augment/settings.json*",
         "*Set-Content*.claude/settings.json*", "*Set-Content*.cursor/hooks.json*",
+        "*Set-Content*.codex/config.toml*", "*Set-Content*.codex/hooks.json*",
         "*Set-Content*Claude/settings.json*", "*Set-Content*Cursor/hooks.json*",
         "*Set-Content*.gemini/settings.json*", "*Set-Content*.augment/settings.json*",
         "*Clear-Content*.claude/settings.json*", "*Clear-Content*.cursor/hooks.json*",
+        "*Clear-Content*.codex/config.toml*", "*Clear-Content*.codex/hooks.json*",
         "*Clear-Content*Claude/settings.json*", "*Clear-Content*Cursor/hooks.json*",
         "*Clear-Content*.gemini/settings.json*", "*Clear-Content*.augment/settings.json*",
         "*Out-File*.claude/settings.json*", "*Out-File*.cursor/hooks.json*",
+        "*Out-File*.codex/config.toml*", "*Out-File*.codex/hooks.json*",
         "*Out-File*Claude/settings.json*", "*Out-File*Cursor/hooks.json*",
         "*Out-File*.gemini/settings.json*", "*Out-File*.augment/settings.json*",
 
@@ -453,6 +479,7 @@ IMMUTABLE_DENY_PATTERNS = {
         "*>>*ai-guardian.json*", "*>>*.ai-guardian.json*",
         "*>>*.config/ai-guardian/*", "*>>*.config\\ai-guardian\\*",
         "*>*.claude/settings.json*", "*>*.cursor/hooks.json*",
+        "*>*.codex/config.toml*", "*>*.codex/hooks.json*",
         "*>*Claude/settings.json*", "*>*Cursor/hooks.json*",
         "*>*.gemini/settings.json*", "*>*.augment/settings.json*",
         "*>*.github/hooks/hooks.json*", "*>*.codex/hooks.json*",
@@ -481,6 +508,8 @@ IMMUTABLE_DENY_PATTERNS = {
         "*ren *ai-guardian.json*", "*ren *.ai-guardian.json*", "*ren *.config/ai-guardian/*", "*ren *.config\\ai-guardian\\*",
         "*copy *ai-guardian.json*", "*copy *.ai-guardian.json*", "*copy *.config/ai-guardian/*", "*copy *.config\\ai-guardian\\*",
         "*rm *.claude/settings.json*", "*del *.claude/settings.json*",
+        "*rm *.codex/config.toml*", "*del *.codex/config.toml*",
+        "*rm *.codex/hooks.json*", "*del *.codex/hooks.json*",
         "*rm *.gemini/settings.json*", "*del *.gemini/settings.json*",
         "*rm *.augment/settings.json*", "*del *.augment/settings.json*",
         "*rm *.cursor/hooks.json*", "*del *.cursor/hooks.json*",
@@ -668,6 +697,8 @@ class ToolPolicyChecker:
             "*/.config/ai-guardian/*",     # Config directory
             "*/.cache/ai-guardian/*",      # Cache files (prevents poisoning)
             "*/.claude/hooks.json",        # IDE hooks-only files
+            "*/.codex/config.toml",
+            "*/.codex/hooks.json",
             "*/.cursor/hooks.json",
             "*/Cursor/hooks.json",
             "*/.github/hooks/hooks.json",  # Copilot
@@ -1726,6 +1757,8 @@ class ToolPolicyChecker:
             "*/.local/state/ai-guardian/*",
             "*/.cache/ai-guardian/*",
             "*/.claude/hooks.json",
+            "*/.codex/config.toml",
+            "*/.codex/hooks.json",
             "*/.cursor/hooks.json",
             "*/Cursor/hooks.json",
             "*/.claude/settings.json",
@@ -2016,6 +2049,14 @@ class ToolPolicyChecker:
         # Cursor detection
         if "cursor_version" in hook_data or "hook_name" in hook_data:
             return "cursor"
+
+        # Codex detection
+        if (
+            hook_data.get("hook_event_name") == "PermissionRequest"
+            or "approval_request_type" in hook_data
+            or "permission_mode" in hook_data
+        ):
+            return "codex"
 
         # Claude Code detection
         if "hook_event_name" in hook_data and hook_data.get("hook_event_name") in ["UserPromptSubmit", "PreToolUse"]:

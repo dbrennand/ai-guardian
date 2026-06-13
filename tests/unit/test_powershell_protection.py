@@ -211,6 +211,22 @@ class PowerShellProtectionTest(TestCase):
 
         self.assertFalse(is_allowed, "PowerShell Move-Item on Cursor hooks should be blocked")
 
+    def test_powershell_blocks_set_content_codex_config(self):
+        """PowerShell Set-Content blocked for Codex config.toml."""
+        hook_data = {
+            "hook_event_name": "PreToolUse",
+            "tool_use": {
+                "name": "PowerShell",
+                "input": {
+                    "command": "Set-Content -Path ~/.codex/config.toml -Value 'model = \"gpt-5\"'"
+                }
+            }
+        }
+
+        is_allowed, error_msg, tool_name = self.policy_checker.check_tool_allowed(hook_data)
+
+        self.assertFalse(is_allowed, "PowerShell Set-Content on Codex config should be blocked")
+
     # ========================================================================
     # Test: PowerShell cannot modify package source
     # ========================================================================

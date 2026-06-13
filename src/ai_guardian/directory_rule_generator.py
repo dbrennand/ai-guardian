@@ -183,12 +183,14 @@ class DirectoryRuleGenerator:
                 # Project-local directories
                 Path("./.claude/skills"),
                 Path("./.cursor/skills"),
+                Path("./.codex/skills"),
                 Path("./.vscode/skills"),
                 Path("./.windsurf/skills"),
 
                 # User home directories
                 Path.home() / ".claude" / "skills",
                 Path.home() / ".cursor" / "skills",
+                Path.home() / ".codex" / "skills",
                 Path.home() / ".vscode" / "skills",
                 Path.home() / ".windsurf" / "skills",
             ]

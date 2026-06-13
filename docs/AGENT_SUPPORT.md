@@ -9,7 +9,7 @@ AI Guardian protects multiple AI coding agents through a unified hook adapter ar
 | Claude Code | `--ide claude` | Full | Full | **Complete** |
 | Cursor | `--ide cursor` | Full | N/A | **Complete** |
 | GitHub Copilot | `--ide copilot` | Full | N/A | **Complete** |
-| OpenAI Codex | `--ide codex` | Full | N/A | **Complete** |
+| OpenAI Codex | `--ide codex` | Full | Full | **Complete** |
 | Windsurf | `--ide windsurf` | Full | N/A | **Complete** |
 | Gemini CLI | `--ide gemini` | Full | N/A | **Complete** |
 | Cline / ZooCode | `--ide cline` | Full | N/A | **Complete** |
@@ -22,19 +22,19 @@ AI Guardian protects multiple AI coding agents through a unified hook adapter ar
 
 ## Hook Capability Matrix
 
-| Agent | UserPromptSubmit | PreToolUse | PostToolUse | BeforeReadFile |
-|-------|-----------------|------------|-------------|----------------|
-| Claude Code | Yes | Yes | Yes | N/A |
-| Cursor | Yes | Yes | Yes | Yes |
-| GitHub Copilot | Yes | Yes | N/A | N/A |
-| OpenAI Codex | Yes | Yes | Yes | N/A |
-| Windsurf | Yes | Yes | Yes | Yes |
-| Gemini CLI | Yes (BeforeAgent) | Yes | Yes | N/A |
-| Cline / ZooCode | Yes | Yes | Yes | N/A |
-| Kiro | Yes | Yes | Yes | N/A |
-| Augment Code | N/A | Yes | Yes | N/A |
-| OpenCode | Yes (chat.message) | Yes | Yes | N/A |
-| Junie | N/A | N/A | N/A | N/A |
+| Agent | UserPromptSubmit | PreToolUse | PermissionRequest | PostToolUse | BeforeReadFile |
+|-------|-----------------|------------|-------------------|-------------|----------------|
+| Claude Code | Yes | Yes | N/A | Yes | N/A |
+| Cursor | Yes | Yes | N/A | Yes | Yes |
+| GitHub Copilot | Yes | Yes | N/A | N/A | N/A |
+| OpenAI Codex | Yes | Yes | Yes | Yes | N/A |
+| Windsurf | Yes | Yes | N/A | Yes | Yes |
+| Gemini CLI | Yes (BeforeAgent) | Yes | N/A | Yes | N/A |
+| Cline / ZooCode | Yes | Yes | N/A | Yes | N/A |
+| Kiro | Yes | Yes | N/A | Yes | N/A |
+| Augment Code | N/A | Yes | N/A | Yes | N/A |
+| OpenCode | Yes (chat.message) | Yes | N/A | Yes | N/A |
+| Junie | N/A | N/A | N/A | N/A | N/A |
 
 ## Protection Level by Hook Availability
 
@@ -149,7 +149,7 @@ Each agent uses different event names. The adapter layer normalizes these.
 | Cline | JSON `cancel` field | `{"cancel": true, "reason": "..."}` |
 | Kiro | Exit code 1 + stderr | stderr = error message |
 | Windsurf | Same as Claude Code | Same as Claude Code |
-| Codex | Same as Claude Code | Same as Claude Code |
+| Codex | Same as Claude Code + `PermissionRequest` deny response | Same as Claude Code + `{"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "deny", "message": "..."}}}` |
 | OpenCode | Same as Claude Code | Same as Claude Code |
 
 ## Architecture
@@ -187,6 +187,7 @@ Detection priority checks unique fields:
 - `agent_action_name` → Windsurf
 - `toolName` → GitHub Copilot
 - `cursor_version` → Cursor
+- `approval_request_type` / `permission_mode` → Codex
 - `kiro_hook_type` → Kiro
 - `is_mcp_tool` → Augment Code
 - `opencode_version` → OpenCode
@@ -197,7 +198,7 @@ All adapters produce a `NormalizedHookInput` dataclass with consistent fields:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `event` | `HookEvent` | Normalized event (PROMPT, PRE_TOOL_USE, POST_TOOL_USE) |
+| `event` | `HookEvent` | Normalized event (PROMPT, PRE_TOOL_USE, PERMISSION_REQUEST, POST_TOOL_USE) |
 | `tool_name` | `str` | Canonical tool name (e.g., "Bash", "Read") |
 | `tool_input` | `dict` | Tool parameters |
 | `file_path` | `str` | File being accessed |
@@ -226,7 +227,7 @@ Agent names: `claude`, `cursor`, `copilot`, `codex`, `windsurf`, `gemini`, `clin
 | Claude Code | `~/.claude/settings.json` |
 | Cursor | `~/.cursor/hooks.json` |
 | GitHub Copilot | `~/.github/hooks/hooks.json` |
-| OpenAI Codex | `~/.codex/hooks.json` |
+| OpenAI Codex | `~/.codex/config.toml` (canonical), `~/.codex/hooks.json` (legacy compatibility) |
 | Windsurf | `~/.codeium/windsurf/hooks.json` |
 | Gemini CLI | `~/.gemini/settings.json` |
 | Cline / ZooCode | `.clinerules/hooks/` (scripts) |

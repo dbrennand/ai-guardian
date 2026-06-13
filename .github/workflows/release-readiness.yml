@@ -203,6 +203,11 @@ jobs:
             (cd "$WORK_DIR" && ai-guardian setup --ide "$ide" --yes) && \
               echo "  $ide: OK" || \
               { echo "  $ide: FAILED"; FAILED="$FAILED $ide"; }
+            if [ "$ide" = "codex" ]; then
+              test -f "$HOME/.codex/config.toml" || { echo "  codex: missing ~/.codex/config.toml"; FAILED="$FAILED codex"; }
+              grep -q "\[\[hooks.PermissionRequest\]\]" "$HOME/.codex/config.toml" || { echo "  codex: missing PermissionRequest hook"; FAILED="$FAILED codex"; }
+              grep -q "\[mcp_servers.ai-guardian\]" "$HOME/.codex/config.toml" || { echo "  codex: missing MCP server config"; FAILED="$FAILED codex"; }
+            fi
             rm -rf "$WORK_DIR"
           done
 

@@ -3565,7 +3565,7 @@ def process_hook_data(hook_data, daemon_state=None):
         # Load security instructions for systemMessage injection (#580, #584)
         # Inject only on first prompt per session + after blocks (not every prompt)
         security_message = None
-        if ide_type == IDEType.CLAUDE_CODE and hook_event == HookEvent.PROMPT:
+        if ide_type in (IDEType.CLAUDE_CODE, IDEType.CODEX) and hook_event == HookEvent.PROMPT:
             try:
                 si_config, si_error = _load_security_instructions_config()
                 if si_error:
@@ -4012,7 +4012,11 @@ def process_hook_data(hook_data, daemon_state=None):
         # Extract tool name for PreToolUse events (needed for permissions and prompt injection)
         tool_name = None
         tool_identifier = None  # Composite identifier like "Skill:code-review" or "mcp__server__tool"
-        if hook_event in (HookEvent.PRE_TOOL_USE, HookEvent.BEFORE_READ_FILE):
+        if hook_event in (
+            HookEvent.PRE_TOOL_USE,
+            HookEvent.BEFORE_READ_FILE,
+            HookEvent.PERMISSION_REQUEST,
+        ):
             tool_name = normalized.tool_name
             tool_input = normalized.tool_input
             _latency_tool = tool_name or ""
@@ -4031,7 +4035,11 @@ def process_hook_data(hook_data, daemon_state=None):
                 tool_identifier = tool_name
 
         # Check tool permissions for PreToolUse events (MCP servers and Skills)
-        if hook_event in (HookEvent.PRE_TOOL_USE, HookEvent.BEFORE_READ_FILE) and HAS_TOOL_POLICY:
+        if hook_event in (
+            HookEvent.PRE_TOOL_USE,
+            HookEvent.BEFORE_READ_FILE,
+            HookEvent.PERMISSION_REQUEST,
+        ) and HAS_TOOL_POLICY:
             try:
                 permissions_config, config_error = _load_permissions_config()
                 if config_error:
@@ -4094,6 +4102,15 @@ def process_hook_data(hook_data, daemon_state=None):
                                           error_message=f"Tool policy check failed (blocked by on_scan_error=block): {e}",
                                           violation_type=ViolationType.TOOL_PERMISSION, security_message=security_message)
                 logging.warning(f"Tool policy check error (fail-open): {e}")
+
+        if hook_event == HookEvent.PERMISSION_REQUEST:
+            # Codex PermissionRequest hooks should deny only on policy blocks and
+            # otherwise allow Codex to continue with its native approval prompt.
+            return format_response(
+                ide_type,
+                has_secrets=False,
+                hook_event=hook_event,
+            )
 
         content_to_scan = None
         filename = "unknown"
@@ -5042,7 +5059,6 @@ def process_hook_input():
         import traceback
         logging.error(traceback.format_exc())
         return {"output": None, "exit_code": 0}
-
 
 
 

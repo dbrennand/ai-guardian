@@ -28,6 +28,7 @@ CONFIG_FILES_ALWAYS_PROTECTED = [
     pytest.param("/home/user/project/.ai-guardian.json", id="project-config"),
     pytest.param("/home/user/.cache/ai-guardian/maintainer-status.json", id="cache"),
     pytest.param("/home/user/.claude/settings.json", id="claude-settings"),
+    pytest.param("/home/user/.codex/config.toml", id="codex-config"),
     pytest.param("/home/user/.cursor/hooks.json", id="cursor-hooks"),
     pytest.param("/home/user/project/.ai-read-deny", id="ai-read-deny"),
 ]

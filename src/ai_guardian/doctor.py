@@ -762,7 +762,7 @@ class Doctor:
                 name="hooks",
                 status=CheckStatus.WARN,
                 message="No IDEs detected",
-                fix_hint="Install Claude Code, Cursor, or GitHub Copilot",
+                fix_hint="Install Claude Code, Cursor, GitHub Copilot, or Codex",
             )
 
         results = []
@@ -772,19 +772,31 @@ class Doctor:
         for ide_type in detected:
             config_path = Path(setup.get_config_path(ide_type)).expanduser()
             ide_name = setup.IDE_CONFIGS[ide_type]["name"]
+            legacy_path = None
+            if ide_type == "codex":
+                legacy = setup.get_legacy_config_path("codex")
+                if legacy:
+                    legacy_path = Path(legacy).expanduser()
 
             if not config_path.exists():
-                results.append(f"{ide_name}: no config file")
-                all_configured = False
-                continue
+                if ide_type == "codex" and legacy_path and legacy_path.exists():
+                    config_path = legacy_path
+                else:
+                    results.append(f"{ide_name}: no config file")
+                    all_configured = False
+                    continue
 
             configured = setup.check_hooks_configured(config_path, ide_type)
             if configured:
-                # For Claude Code, check which hooks are present
-                if ide_type in ("claude", "codex"):
+                if ide_type == "claude":
                     hook_count = self._count_claude_hooks(config_path)
                     results.append(f"{ide_name}: {hook_count}/3 hooks")
                     if hook_count < 3:
+                        all_configured = False
+                elif ide_type == "codex":
+                    hook_count = setup._count_codex_hooks(config_path)
+                    results.append(f"{ide_name}: {hook_count}/4 hooks")
+                    if hook_count < 4:
                         all_configured = False
                 else:
                     results.append(f"{ide_name}: configured")

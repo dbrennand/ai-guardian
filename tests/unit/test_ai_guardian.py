@@ -1397,15 +1397,15 @@ Yyv2dJ5Y2LtZ7YywIDAQABAoIBADCNMXk8y5K6lVZMsEHHWpdGIyDyUPsryXctAJAc
     # ========== Codex Tests ==========
 
     def test_ide_detection_codex_env_override(self):
-        """Test Codex detection with environment variable maps to CLAUDE_CODE"""
+        """Test Codex detection with environment variable override."""
         hook_data = {"prompt": "test"}
 
         with patch.dict(os.environ, {"AI_GUARDIAN_IDE_TYPE": "codex"}):
             ide_type = ai_guardian.detect_ide_type(hook_data)
-            self.assertEqual(ide_type, ai_guardian.IDEType.CLAUDE_CODE)
+            self.assertEqual(ide_type, ai_guardian.IDEType.CODEX)
 
     def test_ide_detection_codex_auto_detect(self):
-        """Test Codex input auto-detected as CLAUDE_CODE (same format)"""
+        """Test Codex input auto-detected via Codex-specific fields."""
         hook_data = {
             "hook_event_name": "PreToolUse",
             "session_id": "test-session",
@@ -1416,10 +1416,10 @@ Yyv2dJ5Y2LtZ7YywIDAQABAoIBADCNMXk8y5K6lVZMsEHHWpdGIyDyUPsryXctAJAc
             "permission_mode": "default"
         }
         ide_type = ai_guardian.detect_ide_type(hook_data)
-        self.assertEqual(ide_type, ai_guardian.IDEType.CLAUDE_CODE)
+        self.assertEqual(ide_type, ai_guardian.IDEType.CODEX)
 
     def test_ide_detection_codex_prompt_event(self):
-        """Test Codex UserPromptSubmit auto-detected as CLAUDE_CODE"""
+        """Test Codex UserPromptSubmit auto-detected as CODEX."""
         hook_data = {
             "hook_event_name": "UserPromptSubmit",
             "session_id": "test-session",
@@ -1429,7 +1429,17 @@ Yyv2dJ5Y2LtZ7YywIDAQABAoIBADCNMXk8y5K6lVZMsEHHWpdGIyDyUPsryXctAJAc
             "permission_mode": "default"
         }
         ide_type = ai_guardian.detect_ide_type(hook_data)
-        self.assertEqual(ide_type, ai_guardian.IDEType.CLAUDE_CODE)
+        self.assertEqual(ide_type, ai_guardian.IDEType.CODEX)
+
+    def test_ide_detection_codex_permission_request(self):
+        """Test Codex PermissionRequest auto-detected as CODEX."""
+        hook_data = {
+            "hook_event_name": "PermissionRequest",
+            "approval_request_type": "Bash",
+            "command": "ls",
+        }
+        ide_type = ai_guardian.detect_ide_type(hook_data)
+        self.assertEqual(ide_type, ai_guardian.IDEType.CODEX)
 
     def test_format_response_copilot_pretooluse_allow(self):
         """Test GitHub Copilot preToolUse response format (allow)

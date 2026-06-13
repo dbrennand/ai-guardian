@@ -61,13 +61,23 @@ class TestHookEvent:
         assert HookEvent.PRE_TOOL_USE == "pretooluse"
         assert HookEvent.POST_TOOL_USE == "posttooluse"
         assert HookEvent.BEFORE_READ_FILE == "beforereadfile"
+        assert HookEvent.PERMISSION_REQUEST == "permissionrequest"
 
     def test_str_mixin(self):
         assert isinstance(HookEvent.PROMPT, str)
         assert HookEvent.PROMPT == "prompt"
 
     def test_all_hook_events(self):
-        assert set(ALL_HOOK_EVENTS) == {"prompt", "pretooluse", "posttooluse", "beforereadfile", "stop", "sessionend", "postcompact"}
+        assert set(ALL_HOOK_EVENTS) == {
+            "prompt",
+            "pretooluse",
+            "posttooluse",
+            "beforereadfile",
+            "permissionrequest",
+            "stop",
+            "sessionend",
+            "postcompact",
+        }
 
     def test_usable_in_tuple_membership(self):
         events = (HookEvent.PRE_TOOL_USE, HookEvent.BEFORE_READ_FILE)

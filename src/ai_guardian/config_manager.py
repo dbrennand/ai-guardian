@@ -5,19 +5,18 @@ Configuration Manager for ai-guardian
 Manages installation config, user config, and project config files.
 """
 
-import os
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+import tomli_w
 
 from ai_guardian.config_utils import get_config_dir
 
 try:
     import tomllib
-except ModuleNotFoundError:
+except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
     import tomli as tomllib  # type: ignore
-
-import tomli_w
 
 
 class ConfigManager:
@@ -64,14 +63,14 @@ class ConfigManager:
 
             # Create or update installation config
             config = {"url": url}
-
-            with open(self.installation_config_path, 'wb') as f:
-                tomli_w.dump(config, f)
+            self.installation_config_path.write_text(
+                tomli_w.dumps(config),
+                encoding="utf-8",
+            )
 
             return True
 
         except Exception as e:
-            import sys
             print(f"Error setting installation URL: {e}", file=sys.stderr)
             return False
 
@@ -86,7 +85,7 @@ class ConfigManager:
             return None
 
         try:
-            with open(self.installation_config_path, 'rb') as f:
+            with open(self.installation_config_path, "rb") as f:
                 config = tomllib.load(f)
             return config.get('url')
         except Exception:
@@ -236,7 +235,7 @@ class ConfigManager:
             dict or None: Parsed config or None if error
         """
         try:
-            with open(path, 'rb') as f:
+            with open(path, "rb") as f:
                 return tomllib.load(f)
         except Exception:
             return None

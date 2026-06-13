@@ -289,7 +289,7 @@ class HookAdapter(ABC):
         elif event_name == "post_tool_use":
             return HookEvent.POST_TOOL_USE
 
-        # Claude Code / Copilot / Cursor / Cline
+        # Claude Code / Codex / Copilot / Cursor / Cline
         if event_name in ("userpromptsubmit", "beforesubmitprompt", "userpromptsubmitted"):
             return HookEvent.PROMPT
         elif event_name in ("pretooluse",):
@@ -298,6 +298,8 @@ class HookAdapter(ABC):
             return HookEvent.POST_TOOL_USE
         elif event_name in ("beforereadfile",):
             return HookEvent.BEFORE_READ_FILE
+        elif event_name in ("permissionrequest",):
+            return HookEvent.PERMISSION_REQUEST
 
         # Cursor hook_name field
         hook_name = hook_data.get("hook_name", "").lower()

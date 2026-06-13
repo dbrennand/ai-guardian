@@ -45,6 +45,11 @@ class TestPathMatching:
         home = os.path.expanduser("~")
         assert scanner.is_agent_config(f"{home}/.codex/hooks.json")
 
+    def test_codex_config_toml_matched(self):
+        scanner = SupplyChainScanner()
+        home = os.path.expanduser("~")
+        assert scanner.is_agent_config(f"{home}/.codex/config.toml")
+
     def test_windsurf_hooks_matched(self):
         scanner = SupplyChainScanner()
         home = os.path.expanduser("~")
@@ -71,6 +76,10 @@ class TestPathMatching:
     def test_project_github_hooks_matched(self):
         scanner = SupplyChainScanner()
         assert scanner.is_agent_config("/some/project/.github/hooks/hooks.json")
+
+    def test_project_codex_config_matched(self):
+        scanner = SupplyChainScanner()
+        assert scanner.is_agent_config("/some/project/.codex/config.toml")
 
     def test_random_json_not_matched(self):
         scanner = SupplyChainScanner()

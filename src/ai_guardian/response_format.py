@@ -31,6 +31,7 @@ _SECURITY_SYSTEM_MESSAGE = (
 class IDEType(Enum):
     """Supported IDE types with different output formats."""
     CLAUDE_CODE = "claude_code"  # Exit codes: 0=allow, 2=block
+    CODEX = "codex"  # Claude-compatible JSON responses + PermissionRequest hook support
     CURSOR = "cursor"  # JSON: {"continue": bool, "user_message": str}
     GITHUB_COPILOT = "github_copilot"  # JSON: {"permissionDecision": "allow"|"deny"}
     GEMINI_CLI = "gemini_cli"  # JSON: {"decision": "deny", "reason": str}
@@ -101,7 +102,7 @@ def detect_hook_event(hook_data):
         hook_data: Parsed JSON input from the IDE
 
     Returns:
-        HookEvent: HookEvent.PROMPT, HookEvent.PRE_TOOL_USE, HookEvent.POST_TOOL_USE, or HookEvent.BEFORE_READ_FILE
+        HookEvent: Normalized hook event enum value
     """
     from ai_guardian.hook_adapters import detect_adapter
     adapter = detect_adapter(hook_data)
